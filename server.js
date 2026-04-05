@@ -6,6 +6,7 @@ const OpenAI = require("openai");
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", true);
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -15,6 +16,7 @@ const client = new OpenAI({
 });
 
 const PORT = process.env.PORT || 3000;
+const OPENAI_TIMEOUT_MS = 25000;
 
 const SYSTEM_PROMPT = `
 You are ACD AI v10, an elite strategic decision analyst.
@@ -302,7 +304,6 @@ function totalScore(scores) {
 
 function detectLanguageCode(text) {
   const t = safeString(text).toLowerCase();
-
   const hasAny = (signals) => signals.some((signal) => t.includes(signal));
 
   if (
@@ -367,107 +368,32 @@ function detectDecisionCategory(optionA, optionB) {
   const text = `${safeString(optionA)} ${safeString(optionB)}`.toLowerCase();
 
   const businessWords = [
-    "business",
-    "brand",
-    "shopify",
-    "dropshipping",
-    "agency",
-    "saas",
-    "startup",
-    "ecommerce",
-    "store",
-    "app",
-    "product",
-    "franchise",
-    "barbershop",
-    "restaurant",
-    "pod",
-    "streetwear",
-    "afacere",
-    "magazin",
-    "frizerie",
-    "aplicatie",
-    "aplicație",
-    "servicii",
-    "services",
-    "online store",
-    "magazin online"
+    "business", "brand", "shopify", "dropshipping", "agency", "saas",
+    "startup", "ecommerce", "store", "app", "product", "franchise",
+    "barbershop", "restaurant", "pod", "streetwear", "afacere",
+    "magazin", "frizerie", "aplicatie", "aplicație", "servicii",
+    "services", "online store", "magazin online"
   ];
 
   const careerWords = [
-    "job",
-    "career",
-    "freelance",
-    "freelancer",
-    "employment",
-    "work",
-    "remote job",
-    "promotion",
-    "skill",
-    "course",
-    "internship",
-    "cv",
-    "resume",
-    "carieră",
-    "cariera",
-    "angajare",
-    "curs",
-    "kurs",
+    "job", "career", "freelance", "freelancer", "employment", "work",
+    "remote job", "promotion", "skill", "course", "internship", "cv",
+    "resume", "carieră", "cariera", "angajare", "curs", "kurs",
     "employment path"
   ];
 
   const moneyWords = [
-    "invest",
-    "investment",
-    "bitcoin",
-    "crypto",
-    "stocks",
-    "stock",
-    "etf",
-    "savings",
-    "save money",
-    "loan",
-    "debt",
-    "side hustle",
-    "income",
-    "profit",
-    "cashflow",
-    "cash flow",
-    "bani",
-    "investiție",
-    "investitie",
-    "economii",
-    "venit",
-    "financiar",
-    "financial"
+    "invest", "investment", "bitcoin", "crypto", "stocks", "stock", "etf",
+    "savings", "save money", "loan", "debt", "side hustle", "income",
+    "profit", "cashflow", "cash flow", "bani", "investiție", "investitie",
+    "economii", "venit", "financiar", "financial"
   ];
 
   const lifeWords = [
-    "move",
-    "relationship",
-    "marriage",
-    "travel",
-    "vacation",
-    "city",
-    "country",
-    "health",
-    "gym",
-    "diet",
-    "family",
-    "routine",
-    "habit",
-    "sleep",
-    "life",
-    "mutare",
-    "relație",
-    "relatie",
-    "căsătorie",
-    "casatorie",
-    "vacanță",
-    "vacanta",
-    "familie",
-    "viață",
-    "viata",
+    "move", "relationship", "marriage", "travel", "vacation", "city",
+    "country", "health", "gym", "diet", "family", "routine", "habit",
+    "sleep", "life", "mutare", "relație", "relatie", "căsătorie",
+    "casatorie", "vacanță", "vacanta", "familie", "viață", "viata",
     "personal"
   ];
 
@@ -614,10 +540,7 @@ function buildFallbackSuggestions(language, winnerLabel, context = {}) {
 }
 
 function buildFallbackScenarios(language, context = {}) {
-  const {
-    local = false,
-    digital = false,
-  } = context;
+  const { local = false, digital = false } = context;
 
   if (language === "ro") {
     return [
@@ -745,82 +668,36 @@ function fallbackAnalysis(optionA, optionB) {
   const allText = `${a} ${b}`;
 
   const digitalWords = [
-    "app",
-    "saas",
-    "software",
-    "ai",
-    "brand",
-    "ecommerce",
-    "shopify",
-    "digital",
-    "course",
-    "content",
-    "agency",
-    "online",
-    "magazin online",
-    "brand online",
-    "aplicatie",
-    "digital products",
-    "digital product",
-    "remote",
-    "global",
+    "app", "saas", "software", "ai", "brand", "ecommerce", "shopify",
+    "digital", "course", "content", "agency", "online", "magazin online",
+    "brand online", "aplicatie", "digital products", "digital product",
+    "remote", "global",
   ];
 
   const localWords = [
-    "barber",
-    "frizer",
-    "frizerie",
-    "salon",
-    "coffee",
-    "restaurant",
-    "construction",
-    "constructii",
-    "service",
-    "repair",
-    "shop",
-    "store",
-    "mecanic",
-    "bucatar",
-    "service auto",
-    "local",
-    "physical business",
-    "afacere locală",
-    "afacere locala",
+    "barber", "frizer", "frizerie", "salon", "coffee", "restaurant",
+    "construction", "constructii", "service", "repair", "shop", "store",
+    "mecanic", "bucatar", "service auto", "local", "physical business",
+    "afacere locală", "afacere locala",
   ];
 
   const beginnerWords = [
-    "beginner",
-    "începător",
-    "incepator",
-    "fără experiență",
-    "fara experienta",
-    "no experience",
-    "newbie",
+    "beginner", "începător", "incepator", "fără experiență",
+    "fara experienta", "no experience", "newbie",
   ];
 
   const lowBudgetWords = [
-    "low budget",
-    "small budget",
-    "cheap",
-    "buget mic",
-    "ieftin",
+    "low budget", "small budget", "cheap", "buget mic", "ieftin",
     "little money",
   ];
 
   const quickProfitWords = [
-    "quick profit",
-    "fast money",
-    "profit rapid",
-    "bani repede",
-    "quick money",
-    "rapid",
+    "quick profit", "fast money", "profit rapid", "bani repede",
+    "quick money", "rapid",
   ];
 
   const lowRiskWords = [
-    "low risk",
-    "safe",
-    "risc mic",
-    "sigur",
+    "low risk", "safe", "risc mic", "sigur",
   ];
 
   const aDigital = scoreText(a, digitalWords);
@@ -894,10 +771,7 @@ function fallbackAnalysis(optionA, optionB) {
   const optionATotal = totalScore(optionAScores);
   const optionBTotal = totalScore(optionBScores);
   const advantage = Math.abs(optionATotal - optionBTotal);
-  const decisionStrength = decisionStrengthFromAdvantage(
-    advantage,
-    language
-  );
+  const decisionStrength = decisionStrengthFromAdvantage(advantage, language);
 
   const winner = optionATotal >= optionBTotal ? "A" : "B";
   const label = winner === "A" ? optionA : optionB;
@@ -1014,12 +888,7 @@ function normalizeAnalysis(data, optionA, optionB) {
   const winnerScores = winner === "A" ? optionAScores : optionBScores;
   const defaultLabel = winner === "A" ? optionA : optionB;
 
-  const fallbackSuggestions = buildFallbackSuggestions(
-    language,
-    winner,
-    {}
-  );
-
+  const fallbackSuggestions = buildFallbackSuggestions(language, winner, {});
   const scenarios = normalizeScenarios(data?.scenarios, language);
   const trendingDecisions = normalizeTrendingDecisions(
     data?.trendingDecisions,
@@ -1071,10 +940,7 @@ function normalizeAnalysis(data, optionA, optionB) {
         ? "Fă un test mic în piață înainte să investești mai mult."
         : "Run a small real-world test."
     ),
-    personalFit: safeString(
-      data?.personalFit,
-      fallbackSuggestions.personalFit
-    ),
+    personalFit: safeString(data?.personalFit, fallbackSuggestions.personalFit),
     suggestedDirection: safeString(
       data?.suggestedDirection,
       fallbackSuggestions.suggestedDirection
@@ -1097,18 +963,64 @@ function normalizeAnalysis(data, optionA, optionB) {
   };
 }
 
+function requestMeta(req) {
+  return {
+    ip: req.ip,
+    method: req.method,
+    path: req.path,
+    at: new Date().toISOString(),
+    userAgent: req.get("user-agent") || "",
+  };
+}
+
+async function withTimeout(promise, ms) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`OpenAI timeout after ${ms}ms`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
     engine: "ACD AI v10",
     status: "running",
+    uptimeSeconds: Math.round(process.uptime()),
+    now: new Date().toISOString(),
+  });
+});
+
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    status: "healthy",
+    engine: "ACD AI v10",
+    uptimeSeconds: Math.round(process.uptime()),
+    now: new Date().toISOString(),
   });
 });
 
 app.post("/analyze", async (req, res) => {
+  const startedAt = Date.now();
+  const meta = requestMeta(req);
+
   try {
     const optionA = safeString(req.body?.optionA);
     const optionB = safeString(req.body?.optionB);
+
+    console.log("Analyze request received:", {
+      ...meta,
+      optionALength: optionA.length,
+      optionBLength: optionB.length,
+    });
 
     if (!optionA || !optionB) {
       return res.status(400).json({
@@ -1159,26 +1071,43 @@ Return the language code too.
 Return JSON only.
 `;
 
-    const response = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.4,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
+    const response = await withTimeout(
+      client.chat.completions.create({
+        model: "gpt-4.1-mini",
+        temperature: 0.4,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      OPENAI_TIMEOUT_MS
+    );
+
+    console.log("OpenAI response received:", {
+      ...meta,
+      durationMs: Date.now() - startedAt,
     });
 
     const text = response?.choices?.[0]?.message?.content || "";
     const parsed = extractJsonObject(text);
 
     if (!parsed) {
+      console.warn("OpenAI returned non-JSON; using fallback:", {
+        ...meta,
+        durationMs: Date.now() - startedAt,
+      });
       return res.json(fallbackAnalysis(optionA, optionB));
     }
 
     const normalized = normalizeAnalysis(parsed, optionA, optionB);
     return res.json(normalized);
   } catch (err) {
-    console.error("ACD AI v10 error:", err);
+    console.error("ACD AI v10 error:", {
+      ...meta,
+      durationMs: Date.now() - startedAt,
+      message: err?.message || String(err),
+      stack: err?.stack || null,
+    });
 
     try {
       const optionA = safeString(req.body?.optionA, "Option A");
@@ -1192,6 +1121,28 @@ Return JSON only.
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`ACD AI v10 server running on port ${PORT}`);
+});
+
+function shutdown(signal) {
+  console.log(`Received ${signal}. Shutting down gracefully...`);
+  server.close(() => {
+    console.log("HTTP server closed.");
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    console.error("Forced shutdown after timeout.");
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
 });
