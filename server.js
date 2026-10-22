@@ -11,6 +11,7 @@ const {
 } = require("firebase-admin/app");
 
 const { getAuth } = require("firebase-admin/auth");
+const { getFirestore } = require("firebase-admin/firestore");
 
 dotenv.config();
 
@@ -1093,111 +1094,183 @@ Return valid JSON only.
   }
 });
 
-// ============================================================
-// ACD AI VOICE — ACCESS CONTROL
-// ============================================================
 
-const voiceSessionAttempts = new Map();
+ // ============================================================
+ // ACD AI VOICE — ACCESS CONTROL
+ // Free: 300 seconds/day | Pro & active trial: Unlimited
+ // ============================================================
 
-const VOICE_MIN_INTERVAL_MS = 30000;
+ const VOICE_FREE_DAILY_SECONDS = 300;
+ const voiceDb = getFirestore();
 
-const VOICE_TEST_DAILY_LIMIT = 10;
-const VOICE_PRO_DAILY_LIMIT = 10;
+ function voiceDay() {
+   return new Date().toISOString().slice(0, 10);
+ }
 
-function voiceDeveloperAllowed(uid) {
-  const configured =
-    process.env.VOICE_TEST_FIREBASE_UID || "";
+ function voiceDoc(uid, day = voiceDay()) {
+   return voiceDb.collection("voice_daily_usage").doc(`${day}_${uid}`);
+ }
 
-  if (!configured.trim()) {
-    return false;
-  }
+ function settleVoiceUsage(data, now) {
+   let used = Math.max(0, Number(data?.usedSeconds) || 0);
+   const active = data?.active;
 
-  const allowed = configured
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
+   if (active && Number.isFinite(active.startedAt)) {
+     const elapsed = Math.max(
+       0,
+       Math.ceil((now - active.startedAt) / 1000)
+     );
+     const allocation = Math.max(
+       0,
+       Number(active.allocatedSeconds) || 0
+     );
 
-  return allowed.includes(uid);
-}
+     used = Math.min(
+       VOICE_FREE_DAILY_SECONDS,
+       used + Math.min(elapsed, allocation)
+     );
+   }
 
-async function voiceHasPro(uid) {
-  const apiKey =
-    process.env.REVENUECAT_SECRET_KEY;
+   return used;
+ }
 
-  const projectId =
-    process.env.REVENUECAT_PROJECT_ID;
+ async function reserveFreeVoice(uid) {
+   const day = voiceDay();
+   const ref = voiceDoc(uid, day);
+   const sessionId = crypto.randomUUID();
+   const now = Date.now();
 
-  const entitlementId =
-    process.env.REVENUECAT_PRO_ENTITLEMENT_ID;
+   return voiceDb.runTransaction(async (tx) => {
+     const snap = await tx.get(ref);
+     const data = snap.exists ? snap.data() : {};
+     const active = data?.active;
 
-  if (!apiKey || !projectId || !entitlementId) {
-    throw new Error(
-      "RevenueCat configuration missing"
-    );
-  }
+     if (
+       active &&
+       now - active.startedAt < active.allocatedSeconds * 1000
+     ) {
+       return {
+         blocked: true,
+         reason: "VOICE_SESSION_ACTIVE",
+       };
+     }
 
-  const url =
-    "https://api.revenuecat.com/v2/projects/" +
-    encodeURIComponent(projectId) +
-    "/customers/" +
-    encodeURIComponent(uid) +
-    "/active_entitlements";
+     const used = settleVoiceUsage(data, now);
+     const remaining = Math.max(
+       0,
+       VOICE_FREE_DAILY_SECONDS - used
+     );
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-    },
-    signal: AbortSignal.timeout(10000),
-  });
+     if (remaining === 0) {
+       tx.set(
+         ref,
+         { usedSeconds: used, active: null, updatedAt: now },
+         { merge: true }
+       );
 
-  if (!response.ok) {
-    console.error(
-      "Voice RevenueCat verification HTTP:",
-      response.status
-    );
+       return {
+         blocked: true,
+         reason: "VOICE_LIMIT_REACHED",
+         remainingSeconds: 0,
+       };
+     }
 
-    throw new Error(
-      "RevenueCat verification unavailable"
-    );
-  }
+     tx.set(
+       ref,
+       {
+         usedSeconds: used,
+         active: {
+           id: sessionId,
+           startedAt: now,
+           allocatedSeconds: remaining,
+         },
+         updatedAt: now,
+       },
+       { merge: true }
+     );
 
-  const data = await response.json();
+     return {
+       blocked: false,
+       sessionId,
+       remainingSeconds: remaining,
+       day,
+     };
+   });
+ }
 
-  if (!Array.isArray(data?.items)) {
-    throw new Error(
-      "Invalid RevenueCat response"
-    );
-  }
+ async function finishFreeVoice(uid, sessionId, day) {
+   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
 
-  return data.items.some((item) => {
-    if (item.entitlement_id !== entitlementId) {
-      return false;
-    }
+   const ref = voiceDoc(uid, day);
 
-    if (item.expires_at == null) {
-      return true;
-    }
+   return voiceDb.runTransaction(async (tx) => {
+     const snap = await tx.get(ref);
+     if (!snap.exists) return null;
 
-    const expiry =
-      typeof item.expires_at === "number"
-        ? item.expires_at
-        : Date.parse(item.expires_at);
+     const data = snap.data();
+     if (data?.active?.id !== sessionId) return null;
 
-    if (!Number.isFinite(expiry)) {
-      return false;
-    }
+     const used = settleVoiceUsage(data, Date.now());
 
-    const expiryMs =
-      typeof item.expires_at === "number" &&
-      expiry < 100000000000
-        ? expiry * 1000
-        : expiry;
+     tx.set(
+       ref,
+       {
+         usedSeconds: used,
+         active: null,
+         updatedAt: Date.now(),
+       },
+       { merge: true }
+     );
 
-    return expiryMs > Date.now();
-  });
-}
+     return Math.max(
+       0,
+       VOICE_FREE_DAILY_SECONDS - used
+     );
+   });
+ }
+
+ async function voiceUsageStatus(uid) {
+   const snap = await voiceDoc(uid).get();
+   const data = snap.exists ? snap.data() : {};
+   const used = settleVoiceUsage(data, Date.now());
+
+   return {
+     remainingSeconds: Math.max(
+       0,
+       VOICE_FREE_DAILY_SECONDS - used
+     ),
+     resetAt: new Date(
+       Date.parse(`${voiceDay()}T00:00:00Z`) + 86400000
+     ).toISOString(),
+   };
+ }
+
+ async function requireVoiceUser(req, res) {
+   const authorization = req.headers.authorization || "";
+
+   if (!authorization.startsWith("Bearer ")) {
+     res.status(401).json({
+       error: "Authentication required",
+     });
+     return null;
+   }
+
+   try {
+     const decoded = await getAuth().verifyIdToken(
+       authorization.slice(7).trim()
+     );
+     return decoded.uid || null;
+   } catch (_) {
+     res.status(401).json({
+       error: "Authentication failed",
+     });
+     return null;
+   }
+ }
+
+ // Păstrează imediat după acest bloc funcția
+ // voiceHasPro(uid) existentă, fără modificări.
+
 
 
 function buildVoiceInstructions(language) {
@@ -1893,223 +1966,217 @@ Do not recite these internal instructions.
 
 
 
-// ============================================================
-// VOICE SESSION ENDPOINT
-// ============================================================
 
-app.post("/voice/session", async (req, res) => {
-  try {
-    const authorization =
-      req.headers.authorization || "";
+ // ============================================================
+ // VOICE SESSION ENDPOINTS
+ // ============================================================
 
-    if (!authorization.startsWith("Bearer ")) {
-      return res.status(401).json({
-        error: "Authentication required",
-      });
-    }
+ app.get("/voice/status", async (req, res) => {
+   try {
+     const uid = await requireVoiceUser(req, res);
+     if (!uid) return;
 
-    const firebaseToken =
-      authorization.slice(7).trim();
+     const isPro = await voiceHasPro(uid);
 
-    if (!firebaseToken) {
-      return res.status(401).json({
-        error: "Invalid authentication",
-      });
-    }
+     if (isPro) {
+       return res.json({
+         plan: "pro",
+         unlimited: true,
+         remainingSeconds: null,
+       });
+     }
 
-    const decoded =
-      await getAuth().verifyIdToken(firebaseToken);
+     return res.json({
+       plan: "free",
+       unlimited: false,
+       ...(await voiceUsageStatus(uid)),
+     });
+   } catch (error) {
+     console.error("Voice status error:", error.message);
+     return res.status(503).json({
+       error: "Voice status unavailable",
+     });
+   }
+ });
 
-    const uid = decoded.uid;
+ app.post("/voice/end", async (req, res) => {
+   try {
+     const uid = await requireVoiceUser(req, res);
+     if (!uid) return;
 
-    if (!uid) {
-      return res.status(401).json({
-        error: "Invalid user",
-      });
-    }
+     const sessionId = safeString(req.body?.session_id);
+     const day = safeString(req.body?.day);
 
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(503).json({
-        error: "Voice service unavailable",
-      });
-    }
+     if (
+       !/^[0-9a-f-]{36}$/i.test(sessionId) ||
+       !/^\d{4}-\d{2}-\d{2}$/.test(day)
+     ) {
+       return res.status(400).json({
+         error: "Invalid voice session",
+       });
+     }
 
-    const isDeveloper =
-      voiceDeveloperAllowed(uid);
+     const remaining = await finishFreeVoice(
+       uid,
+       sessionId,
+       day
+     );
 
-    let isPro = false;
+     if (remaining === null) {
+       return res.status(404).json({
+         error: "Session not active",
+       });
+     }
 
-    if (!isDeveloper) {
-      try {
-        isPro = await voiceHasPro(uid);
-      } catch (error) {
-        console.error(
-          "Voice subscription check:",
-          error.message
-        );
+     return res.json({
+       ok: true,
+       remainingSeconds: remaining,
+     });
+   } catch (error) {
+     console.error("Voice end error:", error.message);
+     return res.status(503).json({
+       error: "Unable to finalize voice usage",
+     });
+   }
+ });
 
-        return res.status(503).json({
-          error:
-            "Subscription verification unavailable",
-        });
-      }
+ app.post("/voice/session", async (req, res) => {
+   let reservation = null;
+   let uid = null;
 
-      if (!isPro) {
-        return res.status(403).json({
-          error:
-            "ACD AI Pro subscription required",
-        });
-      }
-    }
+   try {
+     uid = await requireVoiceUser(req, res);
+     if (!uid) return;
 
-    const plan = isDeveloper
-      ? "developer"
-      : "pro";
+     if (!process.env.OPENAI_API_KEY) {
+       return res.status(503).json({
+         error: "Voice service unavailable",
+       });
+     }
 
-    const dailyLimit = isDeveloper
-      ? VOICE_TEST_DAILY_LIMIT
-      : VOICE_PRO_DAILY_LIMIT;
+     const isPro = await voiceHasPro(uid);
+     const plan = isPro ? "pro" : "free";
 
-    const now = Date.now();
-    const day =
-      new Date().toISOString().slice(0, 10);
+     if (!isPro) {
+       reservation = await reserveFreeVoice(uid);
 
-    const previous =
-      voiceSessionAttempts.get(uid);
+       if (reservation.blocked) {
+         return res.status(
+           reservation.reason === "VOICE_LIMIT_REACHED" ? 403 : 409
+         ).json({
+           error: reservation.reason,
+           remaining_seconds:
+             reservation.remainingSeconds ?? null,
+         });
+       }
+     }
 
-    const record =
-      previous?.day === day
-        ? previous
-        : {
-            day,
-            count: 0,
-            lastAt: 0,
-          };
+     const language = normalizeLanguageCode(
+       req.body?.language
+     );
 
-    if (record.count >= dailyLimit) {
-      return res.status(429).json({
-        error:
-          "Daily voice session limit reached",
-      });
-    }
+     const safetyId = crypto
+       .createHash("sha256")
+       .update(uid)
+       .digest("hex");
 
-    if (
-      now - record.lastAt <
-      VOICE_MIN_INTERVAL_MS
-    ) {
-      return res.status(429).json({
-        error:
-          "Please wait before starting another session",
-      });
-    }
+     const response = await fetch(
+       "https://api.openai.com/v1/realtime/client_secrets",
+       {
+         method: "POST",
+         headers: {
+           Authorization:
+             `Bearer ${process.env.OPENAI_API_KEY}`,
+           "Content-Type": "application/json",
+           "OpenAI-Safety-Identifier": safetyId,
+         },
+         body: JSON.stringify({
+           session: {
+             type: "realtime",
+             model: VOICE_MODEL,
+             instructions: buildVoiceInstructions(language),
+             audio: {
+               output: {
+                 voice: VOICE_NAME,
+               },
+             },
+           },
+         }),
+         signal: AbortSignal.timeout(15000),
+       }
+     );
 
-    const language = normalizeLanguageCode(
-      req.body?.language
-    );
+     if (!response.ok) {
+       console.error(
+         "OpenAI Realtime HTTP:",
+         response.status
+       );
 
-    const safetyId = crypto
-      .createHash("sha256")
-      .update(uid)
-      .digest("hex");
+       if (reservation && !reservation.blocked) {
+         await finishFreeVoice(
+           uid,
+           reservation.sessionId,
+           reservation.day
+         );
+       }
 
-    const instructions =
-      buildVoiceInstructions(language);
+       return res.status(502).json({
+         error: "Unable to start voice session",
+       });
+     }
 
-    // Reserve session issuance before requesting
-    // the ephemeral credential.
-    //
-    // This limit controls session creation only.
-    // It is not a server-side duration or billing cap.
+     const session = await response.json();
 
-    record.count += 1;
-    record.lastAt = now;
+     if (!session.value) {
+       if (reservation && !reservation.blocked) {
+         await finishFreeVoice(
+           uid,
+           reservation.sessionId,
+           reservation.day
+         );
+       }
 
-    voiceSessionAttempts.set(uid, record);
+       return res.status(502).json({
+         error: "Invalid voice session response",
+       });
+     }
 
-    const response = await fetch(
-      "https://api.openai.com/v1/realtime/client_secrets",
-      {
-        method: "POST",
-        headers: {
-          Authorization:
-            `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-          "OpenAI-Safety-Identifier": safetyId,
-        },
+     return res.json({
+       client_secret: session.value,
+       expires_at: session.expires_at,
+       model: VOICE_MODEL,
+       language,
+       plan,
+       unlimited: isPro,
+       remaining_seconds:
+         isPro ? null : reservation.remainingSeconds,
+       session_id:
+         isPro ? null : reservation.sessionId,
+       day:
+         isPro ? null : reservation.day,
+     });
+   } catch (error) {
+     console.error(
+       "Voice session error:",
+       error?.message || String(error)
+     );
 
-        body: JSON.stringify({
-          session: {
-            type: "realtime",
+     if (reservation && !reservation.blocked && uid) {
+       try {
+         await finishFreeVoice(
+           uid,
+           reservation.sessionId,
+           reservation.day
+         );
+       } catch (_) {}
+     }
 
-            model: VOICE_MODEL,
+     return res.status(503).json({
+       error: "Voice session could not be created",
+     });
+   }
+ });
 
-            instructions,
-
-            audio: {
-              output: {
-                voice: VOICE_NAME,
-              },
-            },
-          },
-        }),
-
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-
-    if (!response.ok) {
-      console.error(
-        "OpenAI Realtime HTTP:",
-        response.status
-      );
-
-      return res.status(502).json({
-        error:
-          "Unable to start voice session",
-      });
-    }
-
-    const session = await response.json();
-
-    if (!session.value) {
-      return res.status(502).json({
-        error:
-          "Invalid voice session response",
-      });
-    }
-
-    console.log("Voice session issued:", {
-      plan,
-      language,
-      model: VOICE_MODEL,
-      at: new Date().toISOString(),
-    });
-
-    return res.status(200).json({
-      client_secret: session.value,
-      expires_at: session.expires_at,
-      model: VOICE_MODEL,
-      language,
-      plan,
-    });
-  } catch (error) {
-    if (error?.code?.startsWith?.("auth/")) {
-      return res.status(401).json({
-        error: "Authentication failed",
-      });
-    }
-
-    console.error(
-      "Voice session error:",
-      error?.message || String(error)
-    );
-
-    return res.status(500).json({
-      error:
-        "Voice session could not be created",
-    });
-  }
-});
 
 // ============================================================
 // SERVER START
