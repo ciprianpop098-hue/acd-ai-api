@@ -3,7 +3,23 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const OpenAI = require("openai");
 
+const {
+  initializeApp,
+  applicationDefault,
+  getApps,
+} = require("firebase-admin/app");
+
+const { getAuth } = require("firebase-admin/auth");
+
 dotenv.config();
+
+// Firebase Admin initialization
+// Google credentials must be configured securely on the server.
+if (!getApps().length) {
+  initializeApp({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+  });
+}
 
 const app = express();
 app.set("trust proxy", true);
@@ -1120,6 +1136,260 @@ Return JSON only.
     }
   }
 });
+
+
+// ============================================================
+// ACD AI — SECURE VOICE SESSION
+// Firebase Auth + RevenueCat Pro + OpenAI Realtime
+// ============================================================
+
+const crypto = require("node:crypto");
+
+const voiceSessionAttempts = new Map();
+
+const VOICE_LANGUAGES = new Set([
+  "en", "ro", "es", "fr", "de", "it", "pt",
+]);
+
+const VOICE_DAILY_SESSION_LIMIT = 10;
+const VOICE_MIN_INTERVAL_MS = 30 * 1000;
+
+app.post("/voice/session", async (req, res) => {
+  try {
+    // 1. Firebase authentication
+    const authorization = req.headers.authorization || "";
+
+    if (!authorization.startsWith("Bearer ")) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    const firebaseToken = authorization.slice(7).trim();
+
+    if (!firebaseToken) {
+      return res.status(401).json({
+        error: "Invalid authentication",
+      });
+    }
+
+    const decoded = await getAuth().verifyIdToken(firebaseToken, true);
+    const uid = decoded.uid;
+
+    if (!uid) {
+      return res.status(401).json({
+        error: "Invalid user",
+      });
+    }
+
+    // 2. Check server configuration
+    if (
+      !process.env.REVENUECAT_SECRET_KEY ||
+      !process.env.OPENAI_API_KEY
+    ) {
+      console.error("Voice configuration missing");
+      return res.status(503).json({
+        error: "Voice service unavailable",
+      });
+    }
+
+    // IMPORTANT:
+    // This endpoint requires RevenueCat App User ID = Firebase UID.
+    // Never accept an arbitrary RevenueCat user ID from the request.
+
+    
+    // 3. Verify RevenueCat V2 entitlement
+    const revenueCatProjectId = process.env.REVENUECAT_PROJECT_ID;
+    const proEntitlementId = process.env.REVENUECAT_PRO_ENTITLEMENT_ID;
+
+    if (!revenueCatProjectId || !proEntitlementId) {
+      console.error("RevenueCat V2 configuration missing");
+
+      return res.status(503).json({
+        error: "Subscription verification unavailable",
+      });
+    }
+
+    const revenueCatUrl =
+      `https://api.revenuecat.com/v2/projects/` +
+      `${encodeURIComponent(revenueCatProjectId)}/customers/` +
+      `${encodeURIComponent(uid)}/active_entitlements`;
+
+    const rcResponse = await fetch(revenueCatUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${process.env.REVENUECAT_SECRET_KEY}`,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!rcResponse.ok) {
+      console.error(
+        "RevenueCat V2 verification failed:",
+        rcResponse.status
+      );
+
+      return res.status(503).json({
+        error: "Subscription verification unavailable",
+      });
+    }
+
+    const rcData = await rcResponse.json();
+
+    if (!Array.isArray(rcData?.items)) {
+      return res.status(503).json({
+        error: "Invalid subscription verification response",
+      });
+    }
+
+    const now = Date.now();
+
+    const isPro = rcData.items.some((item) => {
+      if (item.entitlement_id !== proEntitlementId) {
+        return false;
+      }
+
+      if (item.expires_at == null) {
+        return true;
+      }
+
+      return (
+        typeof item.expires_at === "number" &&
+        item.expires_at > now
+      );
+    });
+
+    if (!isPro) {
+      return res.status(403).json({
+        error: "ACD AI Pro subscription required",
+      });
+    }
+
+
+
+    // 4. Basic session issuance limits
+    const today = new Date().toISOString().slice(0, 10);
+    const previous = voiceSessionAttempts.get(uid);
+
+    const record =
+      previous?.day === today
+        ? previous
+        : { day: today, count: 0, lastAt: 0 };
+
+    if (record.count >= VOICE_DAILY_SESSION_LIMIT) {
+      return res.status(429).json({
+        error: "Daily voice session limit reached",
+      });
+    }
+
+    if (now - record.lastAt < VOICE_MIN_INTERVAL_MS) {
+      return res.status(429).json({
+        error: "Please wait before starting another session",
+      });
+    }
+
+    // 5. Select supported language
+    const requestedLanguage =
+      typeof req.body?.language === "string"
+        ? req.body.language.toLowerCase()
+        : "en";
+
+    const language = VOICE_LANGUAGES.has(requestedLanguage)
+      ? requestedLanguage
+      : "en";
+
+    // 6. Reserve a session attempt
+    record.count += 1;
+    record.lastAt = now;
+    voiceSessionAttempts.set(uid, record);
+
+    // 7. Generate an ephemeral OpenAI Realtime token
+    const safetyId = crypto
+      .createHash("sha256")
+      .update(uid)
+      .digest("hex");
+
+    const instructions = [
+      "You are ACD AI, a premium AI decision assistant.",
+      "Help users compare choices, understand trade-offs,",
+      "evaluate risks, and make informed decisions.",
+      "Speak naturally, clearly, and conversationally.",
+      "Do not pretend to know information you do not know.",
+      "Do not promise guaranteed financial or personal outcomes.",
+      `Use language code ${language} for your spoken responses.`,
+      "Introduce yourself briefly when the conversation begins.",
+    ].join(" ");
+
+    const openaiResponse = await fetch(
+      "https://api.openai.com/v1/realtime/client_secrets",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+          "OpenAI-Safety-Identifier": safetyId,
+        },
+        body: JSON.stringify({
+          session: {
+            type: "realtime",
+            model: "gpt-realtime-2.1",
+            instructions,
+            audio: {
+              output: {
+                voice: "marin",
+              },
+            },
+          },
+        }),
+        signal: AbortSignal.timeout(15000),
+      }
+    );
+
+    if (!openaiResponse.ok) {
+      console.error(
+        "OpenAI Realtime session failed:",
+        openaiResponse.status
+      );
+
+      return res.status(502).json({
+        error: "Unable to start voice session",
+      });
+    }
+
+    const session = await openaiResponse.json();
+
+    if (!session.value) {
+      return res.status(502).json({
+        error: "Invalid voice session response",
+      });
+    }
+
+    return res.status(200).json({
+      client_secret: session.value,
+      expires_at: session.expires_at,
+      model: "gpt-realtime-2.1",
+      language,
+    });
+
+  } catch (error) {
+    if (
+      error?.code?.startsWith?.("auth/") ||
+      error?.code === "auth/id-token-revoked"
+    ) {
+      return res.status(401).json({
+        error: "Authentication failed",
+      });
+    }
+
+    console.error("Voice session error:", error?.message);
+
+    return res.status(500).json({
+      error: "Voice session could not be created",
+    });
+  }
+});
+
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`ACD AI v10 server running on port ${PORT}`);
