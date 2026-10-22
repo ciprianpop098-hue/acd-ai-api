@@ -1106,224 +1106,444 @@ Return valid JSON only.
 // Active Pro subscriptions and active trials are unlimited.
 // =====================================================
 
+
 async function voiceHasPro(uid) {
   if (typeof uid !== "string" || !uid.trim()) {
     throw new Error("Invalid Firebase user ID");
   }
 
-  const apiKey = process.env.REVENUECAT_SECRET_API_KEY;
+  const apiKey = process.env.REVENUECAT_SECRET_API_KEY?.trim();
+  const projectId = process.env.REVENUECAT_PROJECT_ID?.trim();
+  const entitlementKey =
+    process.env.REVENUECAT_PRO_ENTITLEMENT_ID?.trim() || "pro";
 
   if (!apiKey) {
     throw new Error("REVENUECAT_SECRET_API_KEY is not configured");
   }
 
-  const response = await fetch(
-    `https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(uid)}`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(10000),
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `RevenueCat verification failed: HTTP ${response.status}`
-    );
+  if (!projectId) {
+    throw new Error("REVENUECAT_PROJECT_ID is not configured");
   }
 
-  const data = await response.json();
-  const entitlement = data?.subscriber?.entitlements?.pro;
+  const baseUrl =
+    `https://api.revenuecat.com/v2/projects/${encodeURIComponent(projectId)}`;
 
-  if (!entitlement) {
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    Accept: "application/json",
+  };
+
+  async function revenueCatGet(url) {
+    const response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) {
+      console.error("RevenueCat API error:", {
+        status: response.status,
+        endpoint: new URL(url).pathname,
+      });
+
+      throw new Error(
+        `RevenueCat verification failed: HTTP ${response.status}`
+      );
+    }
+
+    return response.json();
+  }
+
+  // RevenueCat V2 requires an internal customer ID.
+  // Search using the Firebase UID configured as the App User ID.
+  let nextCustomerUrl =
+    `${baseUrl}/customers?search=${encodeURIComponent(uid)}&limit=100`;
+
+  const customers = [];
+
+  for (let page = 0; page < 20 && nextCustomerUrl; page++) {
+    const data = await revenueCatGet(nextCustomerUrl);
+
+    if (Array.isArray(data?.items)) {
+      customers.push(...data.items);
+    }
+
+    const nextPage = data?.next_page;
+
+    nextCustomerUrl =
+      typeof nextPage === "string" && nextPage
+        ? new URL(
+            nextPage,
+            "https://api.revenuecat.com"
+          ).toString()
+        : null;
+  }
+
+  if (customers.length === 0) {
     return false;
   }
 
-  if (!entitlement.expires_date) {
-    return true;
+  // Resolve the entitlement lookup key (usually "pro")
+  // to the RevenueCat V2 internal entitlement ID.
+  let proEntitlementId = entitlementKey;
+
+  if (!entitlementKey.startsWith("entl")) {
+    let nextEntitlementUrl =
+      `${baseUrl}/entitlements?limit=100`;
+
+    let found = false;
+
+    for (
+      let page = 0;
+      page < 20 && nextEntitlementUrl;
+      page++
+    ) {
+      const data = await revenueCatGet(nextEntitlementUrl);
+
+      const items = Array.isArray(data?.items)
+        ? data.items
+        : [];
+
+      const match = items.find(
+        (item) => item?.lookup_key === entitlementKey
+      );
+
+      if (match?.id) {
+        proEntitlementId = match.id;
+        found = true;
+        break;
+      }
+
+      const nextPage = data?.next_page;
+
+      nextEntitlementUrl =
+        typeof nextPage === "string" && nextPage
+          ? new URL(
+              nextPage,
+              "https://api.revenuecat.com"
+            ).toString()
+          : null;
+    }
+
+    if (!found) {
+      throw new Error(
+        `RevenueCat entitlement "${entitlementKey}" not found`
+      );
+    }
   }
 
-  const expiration = Date.parse(entitlement.expires_date);
+  const now = Date.now();
 
-  if (!Number.isFinite(expiration)) {
-    throw new Error("Invalid RevenueCat entitlement expiration");
+  for (const customer of customers) {
+    if (typeof customer?.id !== "string") {
+      continue;
+    }
+
+    let nextActiveUrl =
+      `${baseUrl}/customers/` +
+      `${encodeURIComponent(customer.id)}` +
+      `/active_entitlements?limit=100`;
+
+    for (
+      let page = 0;
+      page < 20 && nextActiveUrl;
+      page++
+    ) {
+      const data = await revenueCatGet(nextActiveUrl);
+
+      const items = Array.isArray(data?.items)
+        ? data.items
+        : [];
+
+      for (const entitlement of items) {
+        if (
+          entitlement?.entitlement_id !==
+          proEntitlementId
+        ) {
+          continue;
+        }
+
+        const expiresAt = entitlement.expires_at;
+
+        // A non-expiring active entitlement.
+        if (expiresAt === null) {
+          return true;
+        }
+
+        // RevenueCat V2 timestamps are Unix milliseconds.
+        if (
+          typeof expiresAt === "number" &&
+          Number.isFinite(expiresAt) &&
+          expiresAt > now
+        ) {
+          return true;
+        }
+      }
+
+      const nextPage = data?.next_page;
+
+      nextActiveUrl =
+        typeof nextPage === "string" && nextPage
+          ? new URL(
+              nextPage,
+              "https://api.revenuecat.com"
+            ).toString()
+          : null;
+    }
   }
 
-  return expiration > Date.now();
+  return false;
 }
- const voiceDb = getFirestore();
 
- function voiceDay() {
-   return new Date().toISOString().slice(0, 10);
- }
+// ============================================================
+// VOICE USAGE — FIRESTORE
+// Free: 300 seconds per UTC day
+// Pro and active trial: unlimited
+// ============================================================
 
- function voiceDoc(uid, day = voiceDay()) {
-   return voiceDb.collection("voice_daily_usage").doc(`${day}_${uid}`);
- }
+const voiceDb = getFirestore();
 
- function settleVoiceUsage(data, now) {
-   let used = Math.max(0, Number(data?.usedSeconds) || 0);
-   const active = data?.active;
+function voiceDay(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
 
-   if (active && Number.isFinite(active.startedAt)) {
-     const elapsed = Math.max(
-       0,
-       Math.ceil((now - active.startedAt) / 1000)
-     );
-     const allocation = Math.max(
-       0,
-       Number(active.allocatedSeconds) || 0
-     );
+function voiceDoc(uid, day = voiceDay()) {
+  return voiceDb
+    .collection("voice_daily_usage")
+    .doc(`${day}_${uid}`);
+}
 
-     used = Math.min(
-       VOICE_FREE_DAILY_SECONDS,
-       used + Math.min(elapsed, allocation)
-     );
-   }
+function voiceResetAt(day = voiceDay()) {
+  return new Date(
+    Date.parse(`${day}T00:00:00Z`) + 86400000
+  ).toISOString();
+}
 
-   return used;
- }
+function settleVoiceUsage(data, now) {
+  let used = Math.max(
+    0,
+    Number(data?.usedSeconds) || 0
+  );
 
- async function reserveFreeVoice(uid) {
-   const day = voiceDay();
-   const ref = voiceDoc(uid, day);
-   const sessionId = crypto.randomUUID();
-   const now = Date.now();
+  const active = data?.active;
 
-   return voiceDb.runTransaction(async (tx) => {
-     const snap = await tx.get(ref);
-     const data = snap.exists ? snap.data() : {};
-     const active = data?.active;
+  if (
+    active &&
+    Number.isFinite(active.startedAt)
+  ) {
+    const elapsed = Math.max(
+      0,
+      Math.ceil((now - active.startedAt) / 1000)
+    );
 
-     if (
-       active &&
-       now - active.startedAt < active.allocatedSeconds * 1000
-     ) {
-       return {
-         blocked: true,
-         reason: "VOICE_SESSION_ACTIVE",
-       };
-     }
+    const allocation = Math.max(
+      0,
+      Number(active.allocatedSeconds) || 0
+    );
 
-     const used = settleVoiceUsage(data, now);
-     const remaining = Math.max(
-       0,
-       VOICE_FREE_DAILY_SECONDS - used
-     );
+    used += Math.min(elapsed, allocation);
+  }
 
-     if (remaining === 0) {
-       tx.set(
-         ref,
-         { usedSeconds: used, active: null, updatedAt: now },
-         { merge: true }
-       );
+  return Math.min(
+    VOICE_FREE_DAILY_SECONDS,
+    Math.max(0, used)
+  );
+}
 
-       return {
-         blocked: true,
-         reason: "VOICE_LIMIT_REACHED",
-         remainingSeconds: 0,
-       };
-     }
+async function reserveFreeVoice(uid) {
+  const day = voiceDay();
+  const ref = voiceDoc(uid, day);
+  const sessionId = crypto.randomUUID();
+  const now = Date.now();
 
-     tx.set(
-       ref,
-       {
-         usedSeconds: used,
-         active: {
-           id: sessionId,
-           startedAt: now,
-           allocatedSeconds: remaining,
-         },
-         updatedAt: now,
-       },
-       { merge: true }
-     );
+  return voiceDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.exists ? snap.data() : {};
+    const active = data?.active;
 
-     return {
-       blocked: false,
-       sessionId,
-       remainingSeconds: remaining,
-       day,
-     };
-   });
- }
+    // Prevent overlapping free sessions.
+    if (
+      active &&
+      Number.isFinite(active.startedAt) &&
+      Number.isFinite(active.allocatedSeconds) &&
+      now - active.startedAt <
+        active.allocatedSeconds * 1000
+    ) {
+      return {
+        blocked: true,
+        reason: "VOICE_SESSION_ACTIVE",
+      };
+    }
 
- async function finishFreeVoice(uid, sessionId, day) {
-   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+    const used = settleVoiceUsage(data, now);
 
-   const ref = voiceDoc(uid, day);
+    const remaining = Math.max(
+      0,
+      VOICE_FREE_DAILY_SECONDS - used
+    );
 
-   return voiceDb.runTransaction(async (tx) => {
-     const snap = await tx.get(ref);
-     if (!snap.exists) return null;
+    if (remaining <= 0) {
+      tx.set(
+        ref,
+        {
+          usedSeconds: VOICE_FREE_DAILY_SECONDS,
+          active: null,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
 
-     const data = snap.data();
-     if (data?.active?.id !== sessionId) return null;
+      return {
+        blocked: true,
+        reason: "VOICE_LIMIT_REACHED",
+        remainingSeconds: 0,
+      };
+    }
 
-     const used = settleVoiceUsage(data, Date.now());
+    tx.set(
+      ref,
+      {
+        usedSeconds: used,
+        active: {
+          id: sessionId,
+          startedAt: now,
+          allocatedSeconds: remaining,
+        },
+        updatedAt: now,
+      },
+      { merge: true }
+    );
 
-     tx.set(
-       ref,
-       {
-         usedSeconds: used,
-         active: null,
-         updatedAt: Date.now(),
-       },
-       { merge: true }
-     );
+    return {
+      blocked: false,
+      sessionId,
+      remainingSeconds: remaining,
+      day,
+    };
+  });
+}
 
-     return Math.max(
-       0,
-       VOICE_FREE_DAILY_SECONDS - used
-     );
-   });
- }
+async function finishFreeVoice(uid, sessionId, day) {
+  if (
+    typeof uid !== "string" ||
+    !uid.trim() ||
+    typeof sessionId !== "string" ||
+    !sessionId.trim() ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(day)
+  ) {
+    return null;
+  }
 
- async function voiceUsageStatus(uid) {
-   const snap = await voiceDoc(uid).get();
-   const data = snap.exists ? snap.data() : {};
-   const used = settleVoiceUsage(data, Date.now());
+  const ref = voiceDoc(uid, day);
 
-   return {
-     remainingSeconds: Math.max(
-       0,
-       VOICE_FREE_DAILY_SECONDS - used
-     ),
-     resetAt: new Date(
-       Date.parse(`${voiceDay()}T00:00:00Z`) + 86400000
-     ).toISOString(),
-   };
- }
+  return voiceDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
 
- async function requireVoiceUser(req, res) {
-   const authorization = req.headers.authorization || "";
+    if (!snap.exists) {
+      return null;
+    }
 
-   if (!authorization.startsWith("Bearer ")) {
-     res.status(401).json({
-       error: "Authentication required",
-     });
-     return null;
-   }
+    const data = snap.data();
 
-   try {
-     const decoded = await getAuth().verifyIdToken(
-       authorization.slice(7).trim()
-     );
-     return decoded.uid || null;
-   } catch (_) {
-     res.status(401).json({
-       error: "Authentication failed",
-     });
-     return null;
-   }
- }
+    if (data?.active?.id !== sessionId) {
+      return null;
+    }
 
- // Păstrează imediat după acest bloc funcția
- // voiceHasPro(uid) existentă, fără modificări.
+    const now = Date.now();
+    const used = settleVoiceUsage(data, now);
 
+    tx.set(
+      ref,
+      {
+        usedSeconds: used,
+        active: null,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return Math.max(
+      0,
+      VOICE_FREE_DAILY_SECONDS - used
+    );
+  });
+}
+
+async function voiceUsageStatus(uid) {
+  if (typeof uid !== "string" || !uid.trim()) {
+    throw new Error("Invalid Firebase user ID");
+  }
+
+  const day = voiceDay();
+  const snap = await voiceDoc(uid, day).get();
+
+  const data = snap.exists ? snap.data() : {};
+  const used = settleVoiceUsage(data, Date.now());
+
+  return {
+    remainingSeconds: Math.max(
+      0,
+      VOICE_FREE_DAILY_SECONDS - used
+    ),
+    resetAt: voiceResetAt(day),
+  };
+}
+
+// ============================================================
+// VOICE AUTHENTICATION — FIREBASE
+// ============================================================
+
+async function requireVoiceUser(req, res) {
+  const authorization = req.headers.authorization || "";
+
+  if (
+    typeof authorization !== "string" ||
+    !authorization.startsWith("Bearer ")
+  ) {
+    res.status(401).json({
+      error: "Authentication required",
+    });
+
+    return null;
+  }
+
+  const token = authorization.slice(7).trim();
+
+  if (!token) {
+    res.status(401).json({
+      error: "Authentication required",
+    });
+
+    return null;
+  }
+
+  try {
+    const decoded = await getAuth().verifyIdToken(
+      token,
+      true
+    );
+
+    if (!decoded?.uid) {
+      res.status(401).json({
+        error: "Authentication failed",
+      });
+
+      return null;
+    }
+
+    return decoded.uid;
+  } catch (error) {
+    console.error("Voice authentication failed:", {
+      code: error?.code || "unknown",
+    });
+
+    res.status(401).json({
+      error: "Authentication failed",
+    });
+
+    return null;
+  }
+}
 
 
 function buildVoiceInstructions(language) {
