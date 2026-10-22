@@ -1156,7 +1156,7 @@ const VOICE_MIN_INTERVAL_MS = 30000;
 
 // Private testing: one session issuance per day.
 // This is NOT a duration or billing limit.
-const VOICE_TEST_DAILY_LIMIT = 1;
+const VOICE_TEST_DAILY_LIMIT = 10;
 
 // Existing Pro users retain the previous issuance allowance.
 // This is NOT a duration or billing limit.
