@@ -1173,7 +1173,7 @@ app.post("/voice/session", async (req, res) => {
       });
     }
 
-    const decoded = await getAuth().verifyIdToken(firebaseToken, true);
+    const decoded = await getAuth().verifyIdToken(firebaseToken);
     const uid = decoded.uid;
 
     if (!uid) {
