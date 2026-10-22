@@ -1101,6 +1101,59 @@ Return valid JSON only.
  // ============================================================
 
  const VOICE_FREE_DAILY_SECONDS = 300;
+ // =====================================================
+// ACD AI — RevenueCat Pro verification for Voice
+// Active Pro subscriptions and active trials are unlimited.
+// =====================================================
+
+async function voiceHasPro(uid) {
+  if (typeof uid !== "string" || !uid.trim()) {
+    throw new Error("Invalid Firebase user ID");
+  }
+
+  const apiKey = process.env.REVENUECAT_SECRET_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("REVENUECAT_SECRET_API_KEY is not configured");
+  }
+
+  const response = await fetch(
+    `https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(uid)}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(10000),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `RevenueCat verification failed: HTTP ${response.status}`
+    );
+  }
+
+  const data = await response.json();
+  const entitlement = data?.subscriber?.entitlements?.pro;
+
+  if (!entitlement) {
+    return false;
+  }
+
+  if (!entitlement.expires_date) {
+    return true;
+  }
+
+  const expiration = Date.parse(entitlement.expires_date);
+
+  if (!Number.isFinite(expiration)) {
+    throw new Error("Invalid RevenueCat entitlement expiration");
+  }
+
+  return expiration > Date.now();
+}
  const voiceDb = getFirestore();
 
  function voiceDay() {
