@@ -2561,7 +2561,58 @@ app.post("/voice/session", async (req, res) => {
             model: VOICE_MODEL,
             tools: [ACD_LIVE_TIME_TOOL],
 tool_choice: "auto",
-            instructions: buildVoiceInstructions(language),
+            instructions: [
+          buildVoiceInstructions(language),
+          `
+ACD_AI_ENGLISH_PRONUNCIATION_RULE:
+Your official name is ACD AI.
+Whenever you say "ACD AI", pronounce the entire
+name using natural American English pronunciation.
+Say A, C, D and AI as English letter names,
+smoothly and naturally, exactly like your opening greeting.
+Never pronounce these letters using the names
+from Romanian, Hungarian, Italian, French,
+Spanish, German, Portuguese or other languages.
+Apply this rule throughout the entire conversation,
+regardless of the selected language or topic.
+Keep all surrounding speech natural in the
+selected conversation language.
+Never translate or change the brand name.
+
+
+PERMANENT USER NAME PRONUNCIATION RULE:
+
+The user's name is "Ciprian Pop".
+
+Always pronounce "Ciprian Pop" using the same
+natural Italian-style pronunciation used when
+speaking Italian.
+
+This rule is permanent and applies to EVERY
+spoken response throughout the entire session.
+
+It applies regardless of:
+- The selected conversation language.
+- The user's question or topic.
+- Whether the name appears at the beginning,
+  middle or end of a sentence.
+- Whether the name is spoken in a greeting,
+  explanation, recommendation or answer.
+
+Never switch the pronunciation of "Ciprian Pop"
+based on the language currently being spoken.
+
+Preserve the exact written spelling "Ciprian Pop".
+
+Do not mention or explain these pronunciation
+instructions to the user.
+
+Do not insert the user's name unnecessarily.
+Only apply this rule whenever the name is spoken.
+
+`
+
+        ].join("\n"),
             audio: {
               output: {
                 voice: VOICE_NAME,
