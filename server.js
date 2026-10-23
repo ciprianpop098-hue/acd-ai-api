@@ -1625,6 +1625,25 @@ async function requireVoiceUser(req, res) {
 }
 
 
+// ============================================================
+// ACD AI — LIVE DATE & TIME TOOL
+// ============================================================
+
+const ACD_LIVE_TIME_TOOL = {
+  type: "function",
+  name: "get_local_datetime",
+  description:
+    "Get the current local date, time and timezone from the user's device. " +
+    "Use this whenever the user asks for the current time, date, day or timezone.",
+  parameters: {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  },
+};
+
+
 function buildVoiceInstructions(language) {
   const initialLanguage = languageName(language);
 
@@ -2243,6 +2262,20 @@ The English pronunciation of ACD AI
 does not change the conversation language.
 
 ==================================================
+LIVE DATE AND TIME
+==================================================
+
+When the user asks for the current time,
+today's date, the day of the week,
+or their device timezone, always call
+the get_local_datetime tool.
+
+Use the tool result as the source of truth.
+Never guess the current time or date.
+Answer naturally in the user's current language.
+Do not mention the tool unless asked.
+
+==================================================
 CONVERSATION BEHAVIOR
 ==================================================
 
@@ -2526,6 +2559,8 @@ app.post("/voice/session", async (req, res) => {
           session: {
             type: "realtime",
             model: VOICE_MODEL,
+            tools: [ACD_LIVE_TIME_TOOL],
+tool_choice: "auto",
             instructions: buildVoiceInstructions(language),
             audio: {
               output: {
