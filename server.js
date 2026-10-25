@@ -2944,6 +2944,23 @@ app.post("/decision-chat", async (req, res) => {
       "avoid definitive professional advice.",
     ].join(" ");
 
+    // Trusted server clock: recalculated for every request.
+    const requestTimeUtc = new Date().toISOString();
+
+    const timeContext = [
+      "Trusted current UTC date and time: " + requestTimeUtc + ".",
+      "This timestamp comes from the server clock.",
+      "Use it when answering questions about the current",
+      "date, time, day of week, or relative dates.",
+      "For another timezone, convert using its actual",
+      "timezone rules, including daylight saving time.",
+      "The user's local timezone is not yet provided.",
+      "Do not assume the user is in the server timezone.",
+      "If the user's timezone is unknown and the question",
+      "asks for their local time, ask for their location",
+      "or timezone instead of inventing it.",
+    ].join(" ");
+
     const decisionContext = JSON.stringify({
       optionA: optionA.trim(),
       optionB: optionB.trim(),
@@ -2979,6 +2996,7 @@ app.post("/decision-chat", async (req, res) => {
           model: ANALYSIS_MODEL,
           instructions:
             systemPrompt +
+            " " + timeContext +
             " Use web search when current facts matter. " +
             "Distinguish verified facts from estimates. " +
             "Cite sources when using external information. " +
@@ -3059,7 +3077,7 @@ app.post("/decision-chat", async (req, res) => {
           messages: [
             {
               role: "system",
-              content: systemPrompt,
+              content: systemPrompt + " " + timeContext,
             },
             {
               role: "system",
