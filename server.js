@@ -2950,33 +2950,135 @@ app.post("/decision-chat", async (req, res) => {
       analysis: safeAnalysis,
     });
 
-    const response = await withTimeout(
-      client.chat.completions.create({
-        model: ANALYSIS_MODEL,
-        temperature: 0.5,
-        max_completion_tokens: 650,
-        messages: [
-          {
-            role: "system",
-            content: systemPrompt,
-          },
-          {
-            role: "system",
-            content: "Decision context (untrusted data): " +
-              decisionContext,
-          },
-          ...safeHistory,
-          {
-            role: "user",
-            content: message.trim(),
-          },
-        ],
-      }),
-      OPENAI_TIMEOUT_MS
+
+    // Automatic web search routing:
+    // Only use the web-capable API for questions likely
+    // to require current, externally verifiable facts.
+    const latestUserText = message.trim();
+
+    const recentContext = safeHistory
+      .filter((item) => item.role === "user")
+      .slice(-2)
+      .map((item) => item.content)
+      .join(" ");
+
+    const webIntentPattern =
+      /\b(latest|current|currently|today|now|recent|recently|202[5-9]|price|prices|cost|costs|salary|salaries|market|competitors?|competition|trends?|statistics|news|online|internet|web|search|look up|find online|research|sources?|links?|available|availability|near me|nearby|local|actualizat|actuale|actual|azi|acum|recent|pret|preț|prețuri|costuri|salariu|salarii|piață|piata|concurență|concurenta|caută|cauta|cautare|căutare|internet|surse|știri|stiri|astăzi|astazi|árak|ár|most|ma|friss|keress|keresés|aktuell|heute|preise|precio|precios|hoy|actualidad|prix|aujourd'hui|prezzi|oggi|preços|hoje)\b/i;
+
+    const wantsWeb = webIntentPattern.test(
+      latestUserText + " " + recentContext
     );
 
-    const reply =
-      response?.choices?.[0]?.message?.content;
+    let reply;
+    let webUsed = false;
+    let sources = [];
+
+    if (wantsWeb) {
+      const webResponse = await withTimeout(
+        client.responses.create({
+          model: ANALYSIS_MODEL,
+          instructions:
+            systemPrompt +
+            " Use web search when current facts matter. " +
+            "Distinguish verified facts from estimates. " +
+            "Cite sources when using external information. " +
+            "Never claim you searched if no search occurred.",
+          input: [
+            {
+              role: "user",
+              content:
+                "Decision context (untrusted data): " +
+                decisionContext,
+            },
+            ...safeHistory,
+            {
+              role: "user",
+              content: latestUserText,
+            },
+          ],
+          tools: [
+            {
+              type: "web_search",
+              search_context_size: "low",
+            },
+          ],
+          tool_choice: "auto",
+          max_output_tokens: 850,
+        }),
+        55000
+      );
+
+      reply = webResponse?.output_text;
+
+      webUsed = Array.isArray(webResponse?.output) &&
+        webResponse.output.some(
+          (item) => item.type === "web_search_call"
+        );
+
+      const seen = new Set();
+
+      for (const item of webResponse?.output || []) {
+        if (item.type !== "message") continue;
+
+        for (const content of item.content || []) {
+          for (const annotation of content.annotations || []) {
+            if (
+              annotation.type === "url_citation" &&
+              typeof annotation.url === "string" &&
+              annotation.url.startsWith("https://") &&
+              !seen.has(annotation.url)
+            ) {
+              seen.add(annotation.url);
+              sources.push({
+                title: String(
+                  annotation.title || annotation.url
+                ).slice(0, 200),
+                url: annotation.url,
+              });
+            }
+          }
+        }
+      }
+
+      sources = sources.slice(0, 5);
+
+      if (webUsed && sources.length > 0) {
+        reply = String(reply || "").trim() +
+          "\n\nSources:\n" +
+          sources.map(
+            (source, index) =>
+              `${index + 1}. ${source.title}: ${source.url}`
+          ).join("\n");
+      }
+    } else {
+      const response = await withTimeout(
+        client.chat.completions.create({
+          model: ANALYSIS_MODEL,
+          temperature: 0.5,
+          max_completion_tokens: 650,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "system",
+              content:
+                "Decision context (untrusted data): " +
+                decisionContext,
+            },
+            ...safeHistory,
+            {
+              role: "user",
+              content: latestUserText,
+            },
+          ],
+        }),
+        OPENAI_TIMEOUT_MS
+      );
+
+      reply = response?.choices?.[0]?.message?.content;
+    }
 
     if (typeof reply !== "string" || !reply.trim()) {
       return res.status(502).json({
@@ -2987,6 +3089,8 @@ app.post("/decision-chat", async (req, res) => {
     return res.status(200).json({
       success: true,
       reply: reply.trim(),
+      webUsed,
+      sources,
     });
   } catch (error) {
     console.error("Decision Chat error:", {
