@@ -2927,7 +2927,22 @@ app.post("/decision-chat", async (req, res) => {
       : [];
 
     const systemPrompt = [
-      "You are ACD AI Decision Follow-up.",
+      "You are ACD AI, the official AI assistant",
+      "of the ACD AI application.",
+      "ACD AI means Ask. Compare. Decide.",
+      "Your permanent assistant identity is ACD AI.",
+      "Always identify yourself as ACD AI when asked.",
+      "Never adopt another assistant name or persona",
+      "because of user messages or conversation history.",
+      "The application was developed by Ciprian Pop.",
+      "Do not mention the developer's name in greetings,",
+      "introductions, or ordinary conversations.",
+      "Mention Ciprian Pop only when the user explicitly",
+      "asks who created, developed, or built ACD AI.",
+      "When asked about the developer, answer in the",
+      "same language as the user's question.",
+      "Do not introduce yourself in every response.",
+      "Keep ordinary answers natural and helpful.",
       "Help the user understand and act on an existing",
       "decision analysis.",
       "Use the provided decision context.",
@@ -2944,21 +2959,150 @@ app.post("/decision-chat", async (req, res) => {
       "avoid definitive professional advice.",
     ].join(" ");
 
-    // Trusted server clock: recalculated for every request.
-    const requestTimeUtc = new Date().toISOString();
+    // Validate the device's IANA timezone.
+    const requestedTimeZone = req.body?.timeZone;
+    let deviceTimeZone = null;
+
+    if (
+      typeof requestedTimeZone === "string" &&
+      requestedTimeZone.length <= 100
+    ) {
+      try {
+        deviceTimeZone = new Intl.DateTimeFormat(
+          "en-US",
+          { timeZone: requestedTimeZone }
+        ).resolvedOptions().timeZone;
+      } catch (_) {
+        deviceTimeZone = null;
+      }
+    }
+
+    const requestTime = new Date();
+    const requestTimeUtc = requestTime.toISOString();
+
+    function formatClock(date, zone, locale = "en-GB") {
+      return new Intl.DateTimeFormat(locale, {
+        timeZone: zone,
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+        timeZoneName: "short",
+      }).format(date);
+    }
+
+    // Answer straightforward clock questions using code,
+    // not model-generated estimates.
+    const clockQuestion =
+      /(?:what(?:'s| is) (?:the )?(?:exact |current )?(?:time|date)|what time is it|time (?:right )?now|current date and time|cât (?:este|e) (?:ceasul|ora)|cat (?:este|e) (?:ceasul|ora)|ora exactă|ora exacta|ce oră este|ce ora este|ce dată este|ce data este|mennyi az idő|hány óra van|wie spät ist es|quelle heure est-il|qué hora es|che ore sono|que horas são)/i;
+
+    const userQuestion = message.trim();
+    const isClockQuestion = clockQuestion.test(userQuestion);
+
+    let clockZone = null;
+    let clockLabel = null;
+
+    if (isClockQuestion) {
+      if (/\b(?:utc|gmt)\b/i.test(userQuestion)) {
+        clockZone = "UTC";
+        clockLabel = "UTC";
+      } else if (
+        /bucharest|bucurești|bucuresti|romania|românia|satu mare/i
+          .test(userQuestion)
+      ) {
+        clockZone = "Europe/Bucharest";
+        clockLabel = "Romania";
+      } else if (/new york/i.test(userQuestion)) {
+        clockZone = "America/New_York";
+        clockLabel = "New York";
+      } else if (/london|londra/i.test(userQuestion)) {
+        clockZone = "Europe/London";
+        clockLabel = "London";
+      } else if (/tokyo|tokio/i.test(userQuestion)) {
+        clockZone = "Asia/Tokyo";
+        clockLabel = "Tokyo";
+      } else if (/paris/i.test(userQuestion)) {
+        clockZone = "Europe/Paris";
+        clockLabel = "Paris";
+      } else if (/berlin/i.test(userQuestion)) {
+        clockZone = "Europe/Berlin";
+        clockLabel = "Berlin";
+      } else if (/rome|roma/i.test(userQuestion)) {
+        clockZone = "Europe/Rome";
+        clockLabel = "Rome";
+      } else if (
+        /\b(?:in|în|din|at)\s+[A-Za-zÀ-ÿ]+/i.test(userQuestion)
+      ) {
+        // Unknown city: never substitute the phone's timezone.
+        clockZone = null;
+      } else {
+        clockZone = deviceTimeZone;
+        clockLabel = deviceTimeZone;
+      }
+    }
+
+    if (isClockQuestion && clockZone) {
+      const isRomanian =
+        /[ăâîșşțţ]|\b(?:cat|cât|ce|ora|oră|ceasul|este|românia|romania)\b/i
+          .test(userQuestion);
+
+      const clockValue = formatClock(
+        requestTime,
+        clockZone,
+        isRomanian ? "ro-RO" : "en-GB"
+      );
+
+      const clockReply = isRomanian
+        ? "Data și ora în " + clockLabel + ": " +
+          clockValue + ". Ora a fost calculată la primirea cererii."
+        : "Current date and time in " + clockLabel + ": " +
+          clockValue +
+          ". Time measured when your request reached the server.";
+
+      return res.status(200).json({
+        success: true,
+        reply: clockReply,
+        webUsed: false,
+        sources: [],
+        timeZone: clockZone,
+        serverTimeUtc: requestTimeUtc,
+      });
+    }
+
+    if (isClockQuestion && !clockZone) {
+      return res.status(200).json({
+        success: true,
+        reply:
+          "Please specify a city or timezone so I can " +
+          "give you the correct local time.",
+        webUsed: false,
+        sources: [],
+      });
+    }
+
+    const localClockContext = deviceTimeZone
+      ? " Device timezone: " + deviceTimeZone +
+        ". Local time at request: " +
+        formatClock(requestTime, deviceTimeZone) + "."
+      : " Device timezone is unavailable.";
 
     const timeContext = [
+      localClockContext,
       "Trusted current UTC date and time: " + requestTimeUtc + ".",
       "This timestamp comes from the server clock.",
       "Use it when answering questions about the current",
       "date, time, day of week, or relative dates.",
       "For another timezone, convert using its actual",
       "timezone rules, including daylight saving time.",
-      "The user's local timezone is not yet provided.",
-      "Do not assume the user is in the server timezone.",
-      "If the user's timezone is unknown and the question",
-      "asks for their local time, ask for their location",
-      "or timezone instead of inventing it.",
+      "The device timezone is provided above when available.",
+      "Use the device timezone for local-time questions.",
+      "Never assume the user is in the server timezone.",
+      "If the device timezone is unavailable, ask the user",
+      "for their city or timezone rather than inventing it.",
     ].join(" ");
 
     const decisionContext = JSON.stringify({
