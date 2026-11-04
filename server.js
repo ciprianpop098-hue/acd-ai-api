@@ -1030,10 +1030,11 @@ app.post("/analyze", async (req, res) => {
     // Enforcement disabled unless explicitly enabled.
     if (ANALYSIS_QUOTA_ENFORCED) {
       try {
-        const uid = await requireVoiceUser(req, res);
-        if (!uid) return;
+        const user = await requireVoiceUser(req, res, { includeClaims: true });
+        if (!user) return;
 
-        const isPro = await voiceHasPro(uid);
+        const { uid, isAnonymous } = user;
+        const isPro = await voiceHasPro(uid, { allowMissingCustomer: isAnonymous });
 
         if (!isPro) {
           // ACD_ANALYSIS_REQUEST_ID_V3_2
@@ -1697,7 +1698,7 @@ async function voiceUsageStatus(uid) {
 // REVENUECAT — PRO / ACTIVE TRIAL
 // ============================================================
 
-async function voiceHasPro(uid) {
+async function voiceHasPro(uid, { allowMissingCustomer = false } = {}) {
   if (typeof uid !== "string" || !uid.trim()) {
     throw new Error("Invalid Firebase user ID");
   }
@@ -1733,6 +1734,13 @@ async function voiceHasPro(uid) {
       signal: AbortSignal.timeout(10000),
     }
   );
+
+  if (allowMissingCustomer && response.status === 404) {
+    const error = await response.json().catch(() => null);
+    if (error?.type === "resource_missing") {
+      return false;
+    }
+  }
 
   if (!response.ok) {
     throw new Error(
@@ -1791,7 +1799,7 @@ async function getFirebaseVoiceVerifier() {
   return firebaseVoiceVerifierPromise;
 }
 
-async function requireVoiceUser(req, res) {
+async function requireVoiceUser(req, res, { includeClaims = false } = {}) {
   const authorization = req.headers.authorization;
 
   if (
@@ -1842,6 +1850,13 @@ async function requireVoiceUser(req, res) {
       payload.iat > now + 5
     ) {
       throw new Error("Invalid Firebase token claims");
+    }
+
+    if (includeClaims) {
+      return {
+        uid: payload.sub,
+        isAnonymous: payload.firebase?.sign_in_provider === "anonymous",
+      };
     }
 
     return payload.sub;
