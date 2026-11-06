@@ -15,6 +15,31 @@ const {
   getCompletedAnalysis,
 } = require("./analysis_quota");
 
+const {
+  initializeDecisionStore,
+  storeDecision,
+  getOwnedDecision,
+} = require("./decision_context_store");
+
+// Disabled by default. Do not enable before Flutter integration.
+const CHAT_SECURE_CONTEXT_ENABLED =
+  process.env.ACD_CHAT_SECURE_CONTEXT_V1 === "true";
+
+const {
+  initializeChatQuotaV2,
+  reserveFreeChatV2,
+  settleFreeChatV2,
+  utcDay,
+} = require("./decision_chat_quota_v2");
+
+// ACD_CHAT_QUOTA_V2_ACTIVE
+// FREE: 15 successful Chat responses per UTC day.
+// PRO: no fixed daily Chat quota.
+
+// FREE Chat is disabled unless explicitly enabled.
+const FREE_DECISION_CHAT_ENABLED =
+  process.env.ACD_FREE_DECISION_CHAT_V1 === "true";
+
 const ANALYSIS_QUOTA_ENFORCED =
   process.env.ACD_ANALYSIS_QUOTA_ENFORCE === "true";
 
@@ -1187,13 +1212,51 @@ Return valid JSON only.
       });
     }
 
+    // ACD_CHAT_ANALYSIS_FINALIZATION_V1
+    // Persist the authenticated decision before final quota
+    // completion, so the recoverable response includes its ID.
+    let completedAnalysis = analysis;
+
+    if (CHAT_SECURE_CONTEXT_ENABLED) {
+      const uid = await requireVoiceUser(req, res);
+      if (!uid) return;
+
+      try {
+        const secureDecisionId = await storeDecision(
+          voiceDb,
+          uid,
+          optionA,
+          optionB,
+          analysis
+        );
+
+        completedAnalysis = {
+          ...analysis,
+          secureDecisionId,
+        };
+      } catch (storeError) {
+        console.error(
+          "Secure decision storage failed:",
+          storeError?.message || String(storeError)
+        );
+
+        if (ANALYSIS_QUOTA_ENFORCED) {
+          await finalizeQuota(false);
+        }
+
+        return res.status(503).json({
+          error: "Secure decision storage unavailable",
+        });
+      }
+    }
+
     if (ANALYSIS_QUOTA_ENFORCED && quotaReservationId) {
-      // ACD_ANALYSIS_RECOVERY_V3_4
+      // Persist the exact response, including secureDecisionId.
       const result = await completeFreeAnalysisWithResponse(
         voiceDb,
         quotaUid,
         quotaReservationId,
-        analysis
+        completedAnalysis
       );
 
       if (!result.counted) {
@@ -1203,7 +1266,7 @@ Return valid JSON only.
       }
     }
 
-    return res.json(analysis);
+    return res.json(completedAnalysis);
   } catch (error) {
     if (ANALYSIS_QUOTA_ENFORCED) {
       try {
@@ -3049,25 +3112,208 @@ if (!(await verifyAcdLiveSession(uid, liveSessionToken))) {
 
 const decisionChatLimits = new Map();
 
-app.post("/decision-chat", async (req, res) => {
+
+// ACD_CHAT_RECOVERY_V1 — disabled unless explicitly enabled.
+const CHAT_RECOVERY_ENABLED =
+  process.env.ACD_CHAT_RECOVERY_V1 === "true";
+
+const {
+  validId: validChatRecoveryId,
+  messageFingerprint,
+  initializeChatRecovery,
+  beginRecoverableChat,
+  completeRecoverableChat,
+  failRecoverableChat,
+} = require("./decision_chat_recovery");
+
+
+// ACD_COMMUNITY_POLL_CHAT_START_V1
+// OFF by default. Enable only after Staging integration tests.
+const COMMUNITY_POLL_CHAT_START_ENABLED =
+  process.env.ACD_COMMUNITY_POLL_CHAT_ENABLED === "true";
+
+const communityPollChatStartLimits = new Map();
+
+app.post("/community-poll-chat/start", async (req, res) => {
+  if (!COMMUNITY_POLL_CHAT_START_ENABLED ||
+      !CHAT_SECURE_CONTEXT_ENABLED) {
+    return res.status(404).json({
+      code: "POLL_CHAT_NOT_ENABLED",
+    });
+  }
+
   try {
     const uid = await requireVoiceUser(req, res);
     if (!uid) return;
 
     const isPro = await voiceHasPro(uid);
 
-    if (!isPro) {
+    if (!isPro && !FREE_DECISION_CHAT_ENABLED) {
+      return res.status(403).json({
+        code: "PRO_REQUIRED",
+      });
+    }
+
+    const optionA = req.body?.optionA;
+    const optionB = req.body?.optionB;
+
+    if (
+      typeof optionA !== "string" ||
+      typeof optionB !== "string" ||
+      optionA.trim().length === 0 ||
+      optionB.trim().length === 0 ||
+      optionA.length > 500 ||
+      optionB.length > 500 ||
+      optionA.trim() === optionB.trim()
+    ) {
+      return res.status(400).json({
+        code: "INVALID_POLL_OPTIONS",
+      });
+    }
+
+    const now = Date.now();
+    const windowMs = 60 * 1000;
+    const previous = communityPollChatStartLimits.get(uid) || [];
+    const recent = previous.filter(t => now - t < windowMs);
+
+    if (recent.length >= 6) {
+      return res.status(429).json({
+        code: "POLL_CHAT_RATE_LIMIT",
+      });
+    }
+
+    recent.push(now);
+    communityPollChatStartLimits.set(uid, recent);
+
+    if (communityPollChatStartLimits.size > 2000) {
+      for (const [key, times] of communityPollChatStartLimits) {
+        if (times.every(t => now - t >= windowMs)) {
+          communityPollChatStartLimits.delete(key);
+        }
+      }
+    }
+
+    // No fabricated AI analysis.
+    // The existing secure Chat endpoint will retrieve this
+    // server-owned context and apply normal message quotas.
+    const analysis = {
+      decisionCategory: "Community Poll",
+    };
+
+    const secureDecisionId = await storeDecision(
+      voiceDb,
+      uid,
+      optionA.trim(),
+      optionB.trim(),
+      analysis
+    );
+
+    return res.status(200).json({
+      secureDecisionId,
+      optionA: optionA.trim(),
+      optionB: optionB.trim(),
+    });
+  } catch (error) {
+    console.error(
+      "Community Poll Chat start failed:",
+      error?.name || "UnknownError"
+    );
+
+    return res.status(503).json({
+      code: "POLL_CHAT_UNAVAILABLE",
+    });
+  }
+});
+
+app.post("/decision-chat", async (req, res) => {
+  let freeChatReservationId = null;
+  let freeChatUid = null;
+  let recoverableChatRequestId = null;
+  let recoverableChatActive = false;
+
+  async function completeChatReservation(responsePayload) {
+    if (!freeChatReservationId) {
+      return responsePayload;
+    }
+
+    if (recoverableChatActive) {
+      const result = await completeRecoverableChat(
+        voiceDb,
+        freeChatUid,
+        recoverableChatRequestId,
+        freeChatReservationId,
+        responsePayload
+      );
+
+      if (!result.completed) {
+        throw new Error(
+          "Recoverable Chat completion failed"
+        );
+      }
+    } else {
+      const result = await settleFreeChatV2(
+        voiceDb,
+        freeChatUid,
+        freeChatReservationId,
+        true
+      );
+
+      if (!result.transitioned) {
+        throw new Error(
+          "FREE Chat reservation finalization failed"
+        );
+      }
+    }
+
+    freeChatReservationId = null;
+    return responsePayload;
+  }
+
+  try {
+    const uid = await requireVoiceUser(req, res);
+    if (!uid) return;
+
+    const isPro = await voiceHasPro(uid);
+
+    if (!isPro && !FREE_DECISION_CHAT_ENABLED) {
       return res.status(403).json({
         error: "ACD AI Pro is required for Decision Chat",
         code: "PRO_REQUIRED",
       });
     }
 
+    if (!isPro && !CHAT_SECURE_CONTEXT_ENABLED) {
+      return res.status(503).json({
+        error: "FREE Decision Chat is not ready",
+        code: "FREE_CHAT_NOT_READY",
+      });
+    }
+
     const body = req.body || {};
-    const optionA = body.optionA;
-    const optionB = body.optionB;
+    let optionA = body.optionA;
+    let optionB = body.optionB;
     const message = body.message;
-    const analysis = body.analysis;
+    let analysis = body.analysis;
+
+    if (CHAT_SECURE_CONTEXT_ENABLED &&
+        (!isPro || body.secureDecisionId)) {
+      const owned = await getOwnedDecision(
+        voiceDb,
+        uid,
+        body.secureDecisionId
+      );
+
+      if (!owned) {
+        return res.status(404).json({
+          error: "Decision not found",
+          code: "DECISION_NOT_FOUND",
+        });
+      }
+
+      optionA = owned.optionA;
+      optionB = owned.optionB;
+      analysis = owned.analysis;
+    }
     const history = body.history;
 
     if (
@@ -3113,6 +3359,117 @@ app.post("/decision-chat", async (req, res) => {
         if (times.every((time) => now - time >= windowMs)) {
           decisionChatLimits.delete(key);
         }
+      }
+    }
+
+    if (!isPro) {
+      try {
+        if (CHAT_RECOVERY_ENABLED) {
+          const requestId =
+            typeof req.body?.chatRequestId === "string"
+              ? req.body.chatRequestId
+              : "";
+
+          const decisionId =
+            typeof req.body?.secureDecisionId === "string"
+              ? req.body.secureDecisionId
+              : "";
+
+          if (
+            !validChatRecoveryId(requestId) ||
+            !validChatRecoveryId(decisionId)
+          ) {
+            return res.status(400).json({
+              code: "CHAT_REQUEST_ID_REQUIRED",
+              error: "Secure Chat request ID required",
+            });
+          }
+
+          const fingerprint = messageFingerprint(
+            decisionId,
+            req.body?.message
+          );
+
+          const recovery = await beginRecoverableChat(
+            voiceDb,
+            uid,
+            requestId,
+            decisionId,
+            fingerprint
+          );
+
+          if (recovery.state === "completed") {
+            return res.status(200).json(recovery.response);
+          }
+
+          if (recovery.state === "conflict") {
+            return res.status(409).json({
+              code: "CHAT_REQUEST_CONFLICT",
+            });
+          }
+
+          if (recovery.state === "pending") {
+            return res.status(202).json({
+              code: "CHAT_REQUEST_PENDING",
+            });
+          }
+
+          if (recovery.state === "expired") {
+            return res.status(410).json({
+              code: "CHAT_REQUEST_EXPIRED",
+              error: "Chat request expired. Retry with a new ID.",
+            });
+          }
+
+          if (recovery.state === "limit") {
+            return res.status(429).json({
+              code: "DAILY_CHAT_LIMIT_REACHED",
+              limit: 15,
+              remaining: 0,
+            });
+          }
+
+          if (recovery.state !== "reserved") {
+            throw new Error(
+              "Unexpected Chat recovery state"
+            );
+          }
+
+          recoverableChatRequestId = requestId;
+          recoverableChatActive = true;
+          freeChatReservationId =
+            recovery.reservationId;
+          freeChatUid = uid;
+        } else {
+          const reservation = await reserveFreeChatV2(
+            voiceDb,
+            uid,
+            utcDay()
+          );
+
+          if (!reservation.allowed) {
+            return res.status(429).json({
+              code: "DAILY_CHAT_LIMIT_REACHED",
+              error: "DAILY_CHAT_LIMIT_REACHED",
+              limit: 15,
+              remaining: 0,
+            });
+          }
+
+          freeChatReservationId =
+            reservation.reservationId;
+          freeChatUid = uid;
+        }
+      } catch (quotaError) {
+        console.error(
+          "FREE Chat reservation failed:",
+          quotaError?.message || String(quotaError)
+        );
+
+        return res.status(503).json({
+          code: "CHAT_QUOTA_UNAVAILABLE",
+          error: "FREE Chat temporarily unavailable",
+        });
       }
     }
 
@@ -3288,25 +3645,25 @@ app.post("/decision-chat", async (req, res) => {
           clockValue +
           ". Time measured when your request reached the server.";
 
-      return res.status(200).json({
+      return res.status(200).json(await completeChatReservation({
         success: true,
         reply: clockReply,
         webUsed: false,
         sources: [],
         timeZone: clockZone,
         serverTimeUtc: requestTimeUtc,
-      });
+      }));
     }
 
     if (isClockQuestion && !clockZone) {
-      return res.status(200).json({
+      return res.status(200).json(await completeChatReservation({
         success: true,
         reply:
           "Please specify a city or timezone so I can " +
           "give you the correct local time.",
         webUsed: false,
         sources: [],
-      });
+      }));
     }
 
     const localClockContext = deviceTimeZone
@@ -3473,12 +3830,14 @@ app.post("/decision-chat", async (req, res) => {
       });
     }
 
-    return res.status(200).json({
+    // Finalize FREE quota before returning the AI reply.
+    // PRO requests have no reservation to finalize.
+    return res.status(200).json(await completeChatReservation({
       success: true,
       reply: reply.trim(),
       webUsed,
       sources,
-    });
+    }));
   } catch (error) {
     console.error("Decision Chat error:", {
       message: error?.message || String(error),
@@ -3487,6 +3846,31 @@ app.post("/decision-chat", async (req, res) => {
     return res.status(503).json({
       error: "Decision Chat temporarily unavailable",
     });
+  } finally {
+    if (freeChatReservationId && freeChatUid) {
+      try {
+        if (recoverableChatActive) {
+          await failRecoverableChat(
+            voiceDb,
+            freeChatUid,
+            recoverableChatRequestId,
+            freeChatReservationId
+          );
+        } else {
+          await settleFreeChatV2(
+            voiceDb,
+            freeChatUid,
+            freeChatReservationId,
+            false
+          );
+        }
+      } catch (releaseError) {
+        console.error(
+          "FREE Chat V2 release failed:",
+          releaseError?.message || String(releaseError)
+        );
+      }
+    }
   }
 });
 
