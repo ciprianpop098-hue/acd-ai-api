@@ -3246,6 +3246,41 @@ app.post("/community-poll-chat/start", async (req, res) => {
   }
 });
 
+
+// Staging FREE Chat V2 storage initialization.
+// One shared initialization promise per server process.
+// Failed attempts can retry; no quotas are bypassed.
+let freeChatQuotaV2StorePromise = null;
+
+async function ensureFreeChatQuotaV2Store() {
+  if (!freeChatQuotaV2StorePromise) {
+    freeChatQuotaV2StorePromise =
+      initializeChatQuotaV2(voiceDb).catch((error) => {
+        freeChatQuotaV2StorePromise = null;
+        throw error;
+      });
+  }
+
+  await freeChatQuotaV2StorePromise;
+}
+
+
+// Staging: initialize Chat recovery storage once per process.
+// Failed initialization can retry; authenticated ownership stays enforced.
+let chatRecoveryStorePromise = null;
+
+async function ensureChatRecoveryStore() {
+  if (!chatRecoveryStorePromise) {
+    chatRecoveryStorePromise =
+      initializeChatRecovery(voiceDb).catch((error) => {
+        chatRecoveryStorePromise = null;
+        throw error;
+      });
+  }
+
+  await chatRecoveryStorePromise;
+}
+
 app.post("/decision-chat", async (req, res) => {
   let freeChatReservationId = null;
   let freeChatUid = null;
@@ -3411,6 +3446,8 @@ app.post("/decision-chat", async (req, res) => {
             req.body?.message
           );
 
+          await ensureChatRecoveryStore();
+
           const recovery = await beginRecoverableChat(
             voiceDb,
             uid,
@@ -3462,6 +3499,8 @@ app.post("/decision-chat", async (req, res) => {
             recovery.reservationId;
           freeChatUid = uid;
         } else {
+          await ensureFreeChatQuotaV2Store();
+
           const reservation = await reserveFreeChatV2(
             voiceDb,
             uid,
