@@ -3134,6 +3134,23 @@ const COMMUNITY_POLL_CHAT_START_ENABLED =
 
 const communityPollChatStartLimits = new Map();
 
+
+// Staging Poll Chat: initialize secure context storage once.
+// Retry initialization if PostgreSQL reports an error.
+let communityPollDecisionStorePromise = null;
+
+async function ensureCommunityPollDecisionStore() {
+  if (!communityPollDecisionStorePromise) {
+    communityPollDecisionStorePromise =
+      initializeDecisionStore(voiceDb).catch((error) => {
+        communityPollDecisionStorePromise = null;
+        throw error;
+      });
+  }
+
+  await communityPollDecisionStorePromise;
+}
+
 app.post("/community-poll-chat/start", async (req, res) => {
   if (!COMMUNITY_POLL_CHAT_START_ENABLED ||
       !CHAT_SECURE_CONTEXT_ENABLED) {
@@ -3146,7 +3163,9 @@ app.post("/community-poll-chat/start", async (req, res) => {
     const uid = await requireVoiceUser(req, res);
     if (!uid) return;
 
-    const isPro = await voiceHasPro(uid);
+    const isPro = await voiceHasPro(uid, {
+      allowMissingCustomer: true,
+    });
 
     if (!isPro && !FREE_DECISION_CHAT_ENABLED) {
       return res.status(403).json({
@@ -3199,6 +3218,8 @@ app.post("/community-poll-chat/start", async (req, res) => {
     const analysis = {
       decisionCategory: "Community Poll",
     };
+
+    await ensureCommunityPollDecisionStore();
 
     const secureDecisionId = await storeDecision(
       voiceDb,
