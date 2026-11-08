@@ -1059,7 +1059,13 @@ app.post("/analyze", async (req, res) => {
         if (!user) return;
 
         const { uid, isAnonymous } = user;
-        const isPro = await voiceHasPro(uid, { allowMissingCustomer: isAnonymous });
+        const stagingAccount =
+          process.env.FIREBASE_PROJECT_ID?.trim() === "acd-ai-community-staging";
+        // A verified Staging account can start on FREE before its first purchase.
+        // voiceHasPro only accepts the explicit resource_missing response.
+        const isPro = await voiceHasPro(uid, {
+          allowMissingCustomer: isAnonymous || stagingAccount,
+        });
 
         if (!isPro) {
           // ACD_ANALYSIS_REQUEST_ID_V3_2
