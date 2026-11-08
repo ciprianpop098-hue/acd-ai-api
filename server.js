@@ -3326,10 +3326,37 @@ app.post("/decision-chat", async (req, res) => {
   }
 
   try {
-    const uid = await requireVoiceUser(req, res);
-    if (!uid) return;
+    const user = await requireVoiceUser(req, res, { includeClaims: true });
+    if (!user) return;
 
-    const isPro = await voiceHasPro(uid);
+    const { uid, isAnonymous } = user;
+    const body = req.body || {};
+    let owned;
+
+    if (
+      process.env.FIREBASE_PROJECT_ID?.trim() === "acd-ai-community-staging" &&
+      COMMUNITY_POLL_CHAT_START_ENABLED &&
+      CHAT_SECURE_CONTEXT_ENABLED &&
+      FREE_DECISION_CHAT_ENABLED &&
+      !isAnonymous &&
+      body.secureDecisionId
+    ) {
+      owned = await getOwnedDecision(voiceDb, uid, body.secureDecisionId);
+
+      if (!owned) {
+        return res.status(404).json({
+          error: "Decision not found",
+          code: "DECISION_NOT_FOUND",
+        });
+      }
+    }
+
+    // Poll start stores a category-only context. Regular analyses also store
+    // a verdict and explanation. Use only the authenticated owner's DB row.
+    const allowMissingCustomer =
+      owned?.analysis?.decisionCategory === "Community Poll" &&
+      Object.keys(owned.analysis).length === 1;
+    const isPro = await voiceHasPro(uid, { allowMissingCustomer });
 
     if (!isPro && !FREE_DECISION_CHAT_ENABLED) {
       return res.status(403).json({
@@ -3345,7 +3372,6 @@ app.post("/decision-chat", async (req, res) => {
       });
     }
 
-    const body = req.body || {};
     let optionA = body.optionA;
     let optionB = body.optionB;
     const message = body.message;
@@ -3353,11 +3379,7 @@ app.post("/decision-chat", async (req, res) => {
 
     if (CHAT_SECURE_CONTEXT_ENABLED &&
         (!isPro || body.secureDecisionId)) {
-      const owned = await getOwnedDecision(
-        voiceDb,
-        uid,
-        body.secureDecisionId
-      );
+      owned ??= await getOwnedDecision(voiceDb, uid, body.secureDecisionId);
 
       if (!owned) {
         return res.status(404).json({
