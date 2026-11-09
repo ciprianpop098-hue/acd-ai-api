@@ -3341,7 +3341,6 @@ app.post("/decision-chat", async (req, res) => {
 
     if (
       process.env.FIREBASE_PROJECT_ID?.trim() === "acd-ai-community-staging" &&
-      COMMUNITY_POLL_CHAT_START_ENABLED &&
       CHAT_SECURE_CONTEXT_ENABLED &&
       FREE_DECISION_CHAT_ENABLED &&
       !isAnonymous &&
@@ -3357,12 +3356,9 @@ app.post("/decision-chat", async (req, res) => {
       }
     }
 
-    // Poll start stores a category-only context. Regular analyses also store
-    // a verdict and explanation. Use only the authenticated owner's DB row.
-    const allowMissingCustomer =
-      owned?.analysis?.decisionCategory === "Community Poll" &&
-      Object.keys(owned.analysis).length === 1;
-    const isPro = await voiceHasPro(uid, { allowMissingCustomer });
+    // Verified Staging accounts with an owned decision can use the Free
+    // quota before their first purchase, for both analyses and polls.
+    const isPro = await voiceHasPro(uid, { allowMissingCustomer: Boolean(owned) });
 
     if (!isPro && !FREE_DECISION_CHAT_ENABLED) {
       return res.status(403).json({
