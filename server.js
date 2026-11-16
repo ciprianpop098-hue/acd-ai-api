@@ -2000,6 +2000,19 @@ const ACD_LIVE_WEB_TOOL = {
 
 
 
+// QA allowance: authenticated allowlisted account, exact Staging project only.
+// It grants test time, not a RevenueCat entitlement or a Production privilege.
+function isVoiceStagingTestUser(uid, env = process.env) {
+  if (env.FIREBASE_PROJECT_ID !== "acd-ai-community-staging" ||
+      typeof uid !== "string" || !uid) return false;
+  const hashes = String(env.VOICE_STAGING_TEST_UID_SHA256S || "")
+    .split(",").map(value => value.trim().toLowerCase())
+    .filter(value => /^[a-f0-9]{64}$/.test(value));
+  if (!hashes.length) return false;
+  const hash = crypto.createHash("sha256").update(uid).digest("hex");
+  return hashes.includes(hash);
+}
+
 // Staging-only single-variable comparison; Production keeps API defaults.
 function buildVoiceInputConfiguration(projectId = process.env.FIREBASE_PROJECT_ID) {
   if (projectId !== "acd-ai-community-staging") return undefined;
@@ -2014,6 +2027,21 @@ function buildVoiceInputConfiguration(projectId = process.env.FIREBASE_PROJECT_I
     },
   };
 }
+
+const ACD_VOICE_BRAND_PRONUNCIATION = `
+ACD AI is a fixed English proper name in every conversation language.
+Its spoken form is exactly: Ay-See-Dee Ay-Eye.
+English phonemes: /eɪ siː diː eɪ aɪ/.
+Use the same smooth American-English sounds you use for this name in an English response.
+Do not localize the letter names or change these sounds to match the surrounding language.
+In Romanian, speak the surrounding words in natural Romanian, use English articulation only
+for ACD AI, then immediately return to Romanian. Apply the same boundary in HU/ES/FR/DE/IT/PT.
+This specific proper-name rule takes precedence over general accent guidance for other words.
+Keep a natural connected rhythm; do not slowly spell the name or insert long gaps.
+The visible name always remains ACD AI. Never output a phonetic replacement in written text.
+The phonetic guide is internal: do not explain or read it aloud unless explicitly requested.
+Introduce yourself once per new session, not after pauses or every response. Do not recite the slogan.
+`;
 
 function buildVoiceInstructions(language) {
   const initialLanguage = languageName(language);
@@ -2066,110 +2094,7 @@ Do not repeatedly introduce yourself.
 BRAND NAME PRONUNCIATION — GLOBAL RULE
 ==================================================
 
-The official written brand name is ACD AI.
-
-The brand name has one consistent pronunciation
-in every supported language.
-
-PRONUNCIATION EXCEPTION:
-
-Pronounce ONLY the brand name ACD AI using
-natural English letter names.
-
-The intended English pronunciation is:
-
-"ay-see-dee ay-eye"
-
-The first part is ACD.
-The second part is AI.
-
-Connect the letters smoothly and naturally.
-
-Use a fluent English rhythm for the brand name.
-
-Avoid exaggerated pauses between letters.
-
-Do not slowly spell out the name as though
-teaching someone the alphabet.
-
-Treat ACD AI as one familiar brand expression.
-
-Do not pronounce the brand name using
-Romanian, Hungarian, Italian, Spanish,
-French, German, or Portuguese letter names.
-
-Do not translate or localize the brand name.
-
-IMPORTANT LANGUAGE BOUNDARY:
-
-When speaking Romanian, Hungarian, Italian, or any
-other non-English language, continue speaking naturally
-in that language.
-
-Only the pronunciation of the brand name ACD AI
-must use English letter sounds.
-
-The English pronunciation applies exclusively to
-the brand name, not to the surrounding sentence.
-
-After saying ACD AI, immediately continue in the
-user's language with the same natural accent,
-grammar, and conversational flow.
-
-For example, in Romanian, introduce yourself
-naturally in Romanian while pronouncing only
-ACD AI with English letter names.
-
-Never switch the entire response to English
-just to pronounce the brand name.
-
-Never explain the pronunciation unless the user asks.
-
-The English pronunciation exception applies
-ONLY to the brand name ACD AI.
-
-All surrounding words must be spoken naturally
-in the user's current conversation language.
-
-For Romanian conversations:
-
-Speak the Romanian words with natural Romanian
-pronunciation, rhythm, and intonation.
-
-When the brand name ACD AI occurs, briefly
-use its established English pronunciation.
-
-Immediately continue speaking in natural
-Romanian after the brand name.
-
-Do not switch the entire sentence to an
-English accent.
-
-Do not switch the conversation language
-to English because of the brand name.
-
-Example:
-
-"Salut! Sunt ACD AI.
-Cu ce te pot ajuta astăzi?"
-
-In this example:
-
-"Salut! Sunt" is spoken in natural Romanian.
-
-"ACD AI" uses natural English pronunciation.
-
-"Cu ce te pot ajuta astăzi?" is spoken
-in natural Romanian.
-
-Apply the same pronunciation boundary
-in Hungarian, Italian, Spanish, French,
-German, Portuguese, and English.
-
-Always preserve the official written
-name ACD AI.
-
-Do not explain these rules unless asked.
+${ACD_VOICE_BRAND_PRONUNCIATION}
 
 ==================================================
 APPLICATION DEVELOPER
@@ -2757,7 +2682,8 @@ app.get("/voice/status", async (req, res) => {
     const uid = await requireVoiceUser(req, res);
     if (!uid) return;
 
-    const isPro = await voiceHasPro(uid, {
+    const isStagingTest = isVoiceStagingTestUser(uid);
+    const isPro = !isStagingTest && await voiceHasPro(uid, {
       // Hosted Staging accounts are separate from store billing identities.
       // Known missing customers can use the existing Free quota, never Pro.
       // Existing helper still rejects every other RevenueCat failure.
@@ -2765,9 +2691,9 @@ app.get("/voice/status", async (req, res) => {
         process.env.FIREBASE_PROJECT_ID === "acd-ai-community-staging",
     });
 
-    if (isPro) {
+    if (isPro || isStagingTest) {
       return res.json({
-        plan: "pro",
+        plan: isStagingTest ? "staging_test" : "pro",
         unlimited: true,
         remainingSeconds: null,
       });
@@ -4018,17 +3944,19 @@ app.post("/voice/session", async (req, res) => {
     }
 
     // RevenueCat entitlement 'pro' includes active trials.
-    const isPro = await voiceHasPro(uid, {
+    const isStagingTest = isVoiceStagingTestUser(uid);
+    const isPro = !isStagingTest && await voiceHasPro(uid, {
       // Hosted Staging accounts are separate from store billing identities.
       // Known missing customers can use the existing Free quota, never Pro.
       // Existing helper still rejects every other RevenueCat failure.
       allowMissingCustomer:
         process.env.FIREBASE_PROJECT_ID === "acd-ai-community-staging",
     });
-    const plan = isPro ? "pro" : "free";
+    const isUnlimited = isPro || isStagingTest;
+    const plan = isStagingTest ? "staging_test" : isPro ? "pro" : "free";
 
     // Reserve available daily time for Free users.
-    if (!isPro) {
+    if (!isUnlimited) {
       reservation = await reserveFreeVoice(uid);
 
       if (reservation.blocked) {
@@ -4089,86 +4017,6 @@ the entire Realtime voice session.
 They apply regardless of the conversation language,
 the user's question, the topic, or the position of
 a name within a sentence.
-
-------------------------------------------------------------
-1. ACD AI — OFFICIAL ASSISTANT NAME
-------------------------------------------------------------
-
-Your official name is "ACD AI".
-
-The name must always be pronounced as five separate
-American English letter names.
-
-The exact letter sequence is:
-
-A = "ay"
-C = "see"
-D = "dee"
-A = "ay"
-I = "eye"
-
-Correct spoken pronunciation:
-"ay see dee ay eye"
-
-Romanian pronunciation guide:
-"Ei Si Di Ei Ai"
-
-The five letter names must be spoken clearly,
-naturally, and smoothly, without merging them
-into a single word.
-
-IMPORTANT:
-
-- Never pronounce "ACD" as one word.
-- Never pronounce "AI" as a Romanian word.
-- Never use Romanian, Hungarian, Italian, French,
-  Spanish, German, Portuguese, or other non-English
-  letter names for the brand.
-- Never translate or rename the brand.
-- Never omit, replace, or reorder its letters.
-- Never change its pronunciation based on the
-  currently selected conversation language.
-
-Whenever you intend to say the official brand name
-aloud, use the phonetic sequence:
-
-"ay see dee ay eye"
-
-For written display, preserve the official spelling:
-
-"ACD AI"
-
-This rule applies whenever you introduce yourself,
-answer questions about your name or identity,
-mention the brand, repeat your name, or refer
-to yourself by name.
-
-EXAMPLE — ROMANIAN:
-
-User: "Cum te numești?"
-Spoken response:
-"Mă numesc ay see dee ay eye."
-
-EXAMPLE — ENGLISH:
-
-User: "What's your name?"
-Spoken response:
-"My name is ay see dee ay eye."
-
-EXAMPLE — HUNGARIAN:
-
-User: "Hogy hívnak?"
-Spoken response:
-"A nevem ay see dee ay eye."
-
-EXAMPLE — ITALIAN:
-
-User: "Come ti chiami?"
-Spoken response:
-"Mi chiamo ay see dee ay eye."
-
-These examples describe the required pronunciation.
-The official written brand name remains "ACD AI".
 
 ------------------------------------------------------------
 2. CIPRIAN POP — FIXED ITALIAN PRONUNCIATION
@@ -4260,10 +4108,6 @@ unless the user explicitly asks about pronunciation.
 
 The official brand identity is always "ACD AI".
 
-The brand pronunciation is always:
-
-"ay see dee ay eye"
-
 The name "Ciprian Pop" must always use the
 specified Italian-style pronunciation.
 
@@ -4324,13 +4168,13 @@ sessionCreated = true;
       model: VOICE_MODEL,
       language,
       plan,
-      unlimited: isPro,
+      unlimited: isUnlimited,
       remaining_seconds:
-        isPro ? null : reservation.remainingSeconds,
+        isUnlimited ? null : reservation.remainingSeconds,
       session_id:
-        isPro ? null : reservation.sessionId,
+        isUnlimited ? null : reservation.sessionId,
       day:
-        isPro ? null : reservation.day,
+        isUnlimited ? null : reservation.day,
     });
   } catch (error) {
     console.error(
