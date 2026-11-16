@@ -2742,7 +2742,13 @@ app.get("/voice/status", async (req, res) => {
     const uid = await requireVoiceUser(req, res);
     if (!uid) return;
 
-    const isPro = await voiceHasPro(uid);
+    const isPro = await voiceHasPro(uid, {
+      // Hosted Staging accounts are separate from store billing identities.
+      // Known missing customers can use the existing Free quota, never Pro.
+      // Existing helper still rejects every other RevenueCat failure.
+      allowMissingCustomer:
+        process.env.FIREBASE_PROJECT_ID === "acd-ai-community-staging",
+    });
 
     if (isPro) {
       return res.json({
@@ -3997,7 +4003,13 @@ app.post("/voice/session", async (req, res) => {
     }
 
     // RevenueCat entitlement 'pro' includes active trials.
-    const isPro = await voiceHasPro(uid);
+    const isPro = await voiceHasPro(uid, {
+      // Hosted Staging accounts are separate from store billing identities.
+      // Known missing customers can use the existing Free quota, never Pro.
+      // Existing helper still rejects every other RevenueCat failure.
+      allowMissingCustomer:
+        process.env.FIREBASE_PROJECT_ID === "acd-ai-community-staging",
+    });
     const plan = isPro ? "pro" : "free";
 
     // Reserve available daily time for Free users.
