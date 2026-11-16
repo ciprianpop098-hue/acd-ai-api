@@ -15,7 +15,7 @@ for(const code of Object.keys(names)) {
   assert.ok(text.includes('Decision analysis is one available capability, not your primary identity'));
   assert.ok(!text.includes('assistant and decision coach'));
   assert.ok(!text.includes('\nDECISION COACHING\n'));
-  assert.ok(text.includes('Begin the conversation in '+names[code]));
+  assert.ok(text.includes('Use '+names[code]+' only as the default for the opening greeting'));
   assert.equal((text.match(/Ay-See-Dee Ay-Eye/g)||[]).length,1);
  });
 }

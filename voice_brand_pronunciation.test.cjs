@@ -15,7 +15,7 @@ for(const [code,name] of Object.entries(names)) {
   const text=build(code);
   assert.equal((text.match(/Ay-See-Dee Ay-Eye/g)||[]).length,1);
   assert.equal((text.match(/\/eɪ siː diː eɪ aɪ\//g)||[]).length,1);
-  assert.ok(text.includes('Begin the conversation in '+name));
+  assert.ok(text.includes('Use '+name+' only as the default for the opening greeting'));
   assert.ok(text.includes('immediately return to Romanian'));
   assert.ok(!text.includes('Ei Si Di Ei Ai'));
   assert.ok(!tail.includes('Romanian pronunciation guide'));
