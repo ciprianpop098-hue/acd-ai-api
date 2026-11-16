@@ -2000,6 +2000,21 @@ const ACD_LIVE_WEB_TOOL = {
 
 
 
+// Staging-only single-variable comparison; Production keeps API defaults.
+function buildVoiceInputConfiguration(projectId = process.env.FIREBASE_PROJECT_ID) {
+  if (projectId !== "acd-ai-community-staging") return undefined;
+  return {
+    turn_detection: {
+      type: "server_vad",
+      threshold: 0.65,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 500,
+      create_response: true,
+      interrupt_response: true,
+    },
+  };
+}
+
 function buildVoiceInstructions(language) {
   const initialLanguage = languageName(language);
 
@@ -4260,6 +4275,7 @@ END OF GLOBAL PRONUNCIATION RULES
 
 ].join("\n"),
             audio: {
+              input: buildVoiceInputConfiguration(),
               output: {
                 voice: VOICE_NAME,
               },
